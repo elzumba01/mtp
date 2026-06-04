@@ -1,160 +1,116 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { api } from '../../api.js';
+import Sidebar from '../../components/Sidebar.jsx';
 import { useAuth } from '../../auth.jsx';
-import { statusBadge, fmtDate, shortHash } from '../../lib.js';
+import { api } from '../../api.js';
+import { shortAddr } from '../../lib.js';
 
 export default function DocumentDetail() {
   const { id } = useParams();
   const { user } = useAuth();
-  const [data, setData] = useState(null);
-  const [walletInput, setWalletInput] = useState('');
-  const [err, setErr] = useState(null);
-  const [msg, setMsg] = useState(null);
+  const [doc, setDoc] = useState(null);
   const [minting, setMinting] = useState(false);
+  const [err, setErr] = useState(null);
 
-  async function load() {
-    setErr(null);
-    try { setData(await api.get(`/documents/${id}`)); }
+  function load() { api.get(`/documents/${id}`).then(setDoc).catch(e => setErr(e.message)); }
+  useEffect(load, [id]);
+
+  async function mintNft() {
+    setErr(null); setMinting(true);
+    try { await api.post(`/nft/mint/${id}`); load(); }
     catch (e) { setErr(e.message); }
-  }
-  useEffect(() => { load(); /* eslint-disable-line */ }, [id]);
-
-  async function mintNFT() {
-    setErr(null); setMsg(null); setMinting(true);
-    try {
-      const body = walletInput.trim() ? { to: walletInput.trim() } : {};
-      const r = await api.post(`/nft/mint/${id}`, body);
-      setMsg(`✓ NFT #${r.nft.token_id} minteado en ETTIOS · tx ${shortHash(r.nft.tx_hash)}`);
-      await load();
-    } catch (e) { setErr(e.message); }
     finally { setMinting(false); }
   }
 
-  if (err && !data) return <div className="card alert alert-error">{err}</div>;
-  if (!data) return <div className="card">Cargando…</div>;
-  const { document: d, validations } = data;
-  const s = statusBadge(d.status);
-  const riskCls = d.ai_risk === 'alto' ? 'badge-risk' : d.ai_risk === 'medio' ? 'badge-warn' : 'badge-good';
-  const canMint = d.status === 'validado' && !d.nft_token_id && (d.user_id === user.id || user.role === 'admin');
-  const hasWallet = !!d.owner_wallet || !!walletInput.trim();
+  if (!doc) return (
+    <div className="layout"><Sidebar />
+      <div className="content"><p className="muted">{err || 'Cargando…'}</p></div>
+    </div>
+  );
+
+  const isOwner = String(doc.user_id?._id) === user.id;
 
   return (
-    <div>
-      <Link to="/u/documents" className="dim">← Volver</Link>
-
-      {err && <div className="alert alert-error mt">{err}</div>}
-      {msg && <div className="alert alert-success mt">{msg}</div>}
-
-      {/* NFT ya minteado */}
-      {d.nft_token_id && (
-        <div className="nft-card mt">
-          <div className="row between">
-            <div>
-              <span className="nft-pill">★ NFT en ETTIOS BLOCKCHAIN</span>
-              <h2 style={{ marginTop: 10 }}>Token ID #{d.nft_token_id}</h2>
-              <p className="dim">Este documento está tokenizado on-chain (Chain ID 2237).
-                 La metadata pública es referenciable desde cualquier marketplace ERC-721.</p>
+    <div className="layout"><Sidebar />
+      <div className="content">
+        <div className="topbar">
+          <div>
+            <Link to="/u/documents" className="dim" style={{ fontSize: '.85rem' }}>← Volver a mis documentos</Link>
+            <h1 style={{ marginTop: 4 }}>{doc.title}</h1>
+            <div className="row mt">
+              <span className="badge badge-info">{(doc.doc_type || 'otro').toUpperCase()}</span>
+              <span className={`badge ${doc.status === 'validado' ? 'badge-good' : doc.status === 'rechazado' ? 'badge-risk' : 'badge-warn'}`}>{doc.status}</span>
+              <span className={`badge ${doc.ai_risk === 'bajo' ? 'badge-good' : doc.ai_risk === 'medio' ? 'badge-warn' : 'badge-risk'}`}>IA: {doc.ai_risk}</span>
             </div>
           </div>
-          <div className="mt"><strong>Transaction hash:</strong></div>
-          <div className="tx-hash">{d.nft_tx_hash}</div>
-          {d.metadata_uri && (
-            <>
-              <div className="mt"><strong>Metadata URI:</strong></div>
-              <div className="tx-hash">{d.metadata_uri}</div>
-            </>
-          )}
-          <div className="mt"><strong>Link público de verificación:</strong></div>
-          <div className="tx-hash">{window.location.origin}/verify?token={d.nft_token_id}</div>
-          <a className="btn btn-accent btn-sm mt" href={`/verify?token=${d.nft_token_id}`} target="_blank" rel="noreferrer">
-            ★ Abrir verificador público →
-          </a>
         </div>
-      )}
 
-      <div className="card mt">
-        <div className="card-head">
-          <div>
-            <h2>{d.title}</h2>
-            <p className="muted">{d.doc_type} · creado el {fmtDate(d.created_at)}</p>
+        {err && <div className="alert alert-error">{err}</div>}
+
+        {doc.nft ? (
+          <div className="nft-card">
+            <div className="row between">
+              <div>
+                <span className="nft-pill">★ NFT EN ETTIOS</span>
+                <h3 style={{ marginTop: 10 }}>Token #{doc.nft.token_id}</h3>
+                <p className="muted">Chain {doc.nft.chain_id} · Block #{doc.nft.block_number}</p>
+              </div>
+              <Link to={`/verify/${doc.nft.token_id}`} className="btn btn-gold btn-sm">Ver verificador público →</Link>
+            </div>
+            <div className="mt">
+              <div className="dim" style={{ fontSize: '.78rem', marginBottom: 4 }}>TX Hash</div>
+              <code className="tx-hash">{doc.nft.tx_hash}</code>
+            </div>
           </div>
-          <span className={`badge ${s.cls}`}>{s.label}</span>
-        </div>
-
-        {d.description && <p>{d.description}</p>}
+        ) : doc.status === 'validado' && isOwner ? (
+          <div className="alert alert-info">
+            <strong>El documento está validado.</strong> Podés mintear el NFT certificado en ETTIOS Blockchain.
+            <div className="mt"><button className="btn btn-gold" onClick={mintNft} disabled={minting}>{minting ? 'Minteando…' : '★ Mintear NFT (5 €)'}</button></div>
+          </div>
+        ) : null}
 
         <div className="grid grid-2 mt">
-          <div>
-            <strong>Análisis IA (Capa 2)</strong>
+          <div className="card">
+            <h3>Información del documento</h3>
+            <dl className="verify-dl mt">
+              <dt>Descripción</dt><dd>{doc.description || '—'}</dd>
+              <dt>Propietario</dt><dd>{doc.user_id?.full_name} {doc.user_id?.company_name && <span className="dim">· {doc.user_id.company_name}</span>}</dd>
+              <dt>Wallet</dt><dd>{doc.user_id?.wallet_address ? <code className="tx-hash" style={{ display: 'inline-block', fontSize: '.7rem' }}>{shortAddr(doc.user_id.wallet_address)}</code> : '—'}</dd>
+              <dt>Verificador</dt><dd>{doc.assigned_to?.full_name || '— sin asignar —'}</dd>
+              <dt>Hash SHA-256</dt><dd><code className="tx-hash" style={{ display: 'inline-block', fontSize: '.7rem' }}>{doc.file_hash || '—'}</code></dd>
+              <dt>Tamaño</dt><dd>{(doc.file_size / 1024).toFixed(1)} KB</dd>
+              <dt>Cargado</dt><dd>{new Date(doc.created_at).toLocaleString()}</dd>
+            </dl>
+          </div>
+          <div className="card">
+            <h3>Análisis IA</h3>
+            <p className="muted mt">{doc.ai_summary}</p>
             <div className="mt">
-              {d.ai_risk
-                ? <span className={`badge ${riskCls}`}>Riesgo {d.ai_risk}</span>
-                : <span className="dim">Pendiente</span>}
+              <strong style={{ fontSize: '.85rem' }}>Nivel de riesgo: </strong>
+              <span className={`badge ${doc.ai_risk === 'bajo' ? 'badge-good' : doc.ai_risk === 'medio' ? 'badge-warn' : 'badge-risk'}`}>{doc.ai_risk}</span>
             </div>
-            {d.ai_summary && <p className="muted mt">{d.ai_summary}</p>}
-          </div>
-          <div>
-            <strong>Trazabilidad (Capa 4)</strong>
-            <p className="muted mt">
-              Propietario: {d.owner_name}<br/>
-              {d.file_hash && <>SHA-256 archivo: <span className="tx-hash">{shortHash(d.file_hash)}</span><br/></>}
-              {d.assigned_to && <>Verificador asignado #{d.assigned_to}<br/></>}
-            </p>
-            {d.file_path && <a className="btn btn-ghost btn-sm mt" href={`/api/documents/${d.id}/file`} target="_blank" rel="noreferrer">↓ Descargar archivo</a>}
           </div>
         </div>
-      </div>
 
-      {/* Acción de mint */}
-      {canMint && (
-        <div className="card mt" style={{ borderColor: 'var(--yellow-400)', borderWidth: 2 }}>
-          <div className="card-head">
-            <h2>Mintear NFT en ETTIOS Blockchain</h2>
-            <span className="nft-pill">Chain ID 2237</span>
-          </div>
-          <p className="muted">Este documento fue validado profesionalmente. Podés emitir ahora el NFT que
-             certifica la validación. Los metadatos (tipo, riesgo IA, dictámenes, reputación)
-             quedan asociados al token on-chain.</p>
-          {!d.owner_wallet && (
-            <div className="field mt">
-              <label>Billetera EVM destino (no tenés una guardada en tu perfil)</label>
-              <input value={walletInput} onChange={e => setWalletInput(e.target.value)}
-                     placeholder="0x…" />
+        <div className="card mt">
+          <h3>Dictámenes profesionales ({doc.validations?.length || 0})</h3>
+          {doc.validations?.length === 0 ? (
+            <p className="muted mt">Sin dictámenes todavía. Esperando asignación de verificador.</p>
+          ) : (
+            <div className="mt">
+              {doc.validations.map(v => (
+                <div key={v._id} style={{ padding: '14px 0', borderBottom: '1px solid var(--line)' }}>
+                  <div className="row between">
+                    <strong>{v.verifier_id?.full_name}</strong>
+                    <span className={`badge ${v.result === 'aprobado' ? 'badge-good' : v.result === 'observado' ? 'badge-warn' : 'badge-risk'}`}>{v.result}</span>
+                  </div>
+                  <p className="dim" style={{ fontSize: '.78rem' }}>{v.verifier_id?.specialty} · {v.val_type}</p>
+                  {v.opinion && <p className="muted mt">"{v.opinion}"</p>}
+                </div>
+              ))}
             </div>
           )}
-          {d.owner_wallet && (
-            <p className="muted">Se enviará a tu billetera: <span className="tx-hash">{d.owner_wallet}</span></p>
-          )}
-          <button className="btn btn-accent mt" disabled={minting || !hasWallet} onClick={mintNFT}>
-            {minting ? 'Minteando en ETTIOS…' : '★ Mintear NFT en ETTIOS'}
-          </button>
         </div>
-      )}
-
-      {/* Dictámenes */}
-      <div className="card mt">
-        <h2>Dictámenes profesionales (Capa 3)</h2>
-        {validations.length === 0 ? <p className="muted">Sin dictámenes todavía.</p> : (
-          <div className="table-wrap"><table className="data">
-            <thead><tr><th>Verificador</th><th>Tipo</th><th>Resultado</th><th>Δ Score</th><th>Opinión</th><th>Fecha</th></tr></thead>
-            <tbody>
-              {validations.map(v => {
-                const resCls = v.result === 'aprobado' ? 'badge-good' : v.result === 'observado' ? 'badge-warn' : 'badge-risk';
-                return (
-                  <tr key={v.id}>
-                    <td><strong>{v.verifier_name}</strong>{v.specialty && <><br/><span className="dim">{v.specialty}</span></>}</td>
-                    <td>{v.val_type}</td>
-                    <td><span className={`badge ${resCls}`}>{v.result}</span></td>
-                    <td>{Number(v.score_impact) > 0 ? '+' : ''}{Number(v.score_impact)}</td>
-                    <td>{v.opinion}</td>
-                    <td className="dim">{fmtDate(v.created_at)}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table></div>
-        )}
       </div>
     </div>
   );

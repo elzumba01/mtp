@@ -1,58 +1,62 @@
+/**
+ * MTP PLATFORM — Marketplace público.
+ */
 import { Router } from 'express';
-import pool from '../db.js';
+import { User, Nft } from '../models/index.js';
 
 const r = Router();
 
-/** GET /api/marketplace/sectors  → lista única de sectores con verificadores activos */
-r.get('/sectors', async (_req, res) => {
-  const [rows] = await pool.query(
-    `SELECT DISTINCT sector FROM users
-     WHERE role='verificador' AND status='activo'
-       AND sector IS NOT NULL AND sector <> ''
-     ORDER BY sector`
-  );
-  res.json(rows.map(r => r.sector));
+r.get('/sectors', async (_req, res, next) => {
+  try {
+    const sectors = await User.distinct('sector', { sector: { $nin: [null, ''] } });
+    res.json(sectors.sort());
+  } catch (e) { next(e); }
 });
 
-/**
- * GET /api/marketplace/professionals?sector=
- *  → lista pública (sin password) ordenada por membresía y reputación.
- */
-r.get('/professionals', async (req, res) => {
-  const { sector } = req.query;
-  let sql = `
-    SELECT u.id, u.full_name, u.sector, u.specialty, u.reputation, u.kyc_status,
-           u.entity_type, u.company_name, u.membership,
-           (SELECT COUNT(*) FROM validations v WHERE v.verifier_id = u.id) AS dictamenes
-    FROM users u
-    WHERE u.role='verificador' AND u.status='activo'`;
-  const params = [];
-  if (sector) { sql += ' AND u.sector = ?'; params.push(sector); }
-  sql += ` ORDER BY FIELD(u.membership,'premium','profesional','basica'),
-                    (u.kyc_status='verificado') DESC,
-                    u.reputation DESC, u.full_name ASC`;
-  const [rows] = await pool.query(sql, params);
-  res.json(rows);
+r.get('/professionals', async (req, res, next) => {
+  try {
+    const { sector, membership, q } = req.query;
+    const filter = {
+      status: 'activo',
+      kyc_status: 'verificado',
+      $or: [{ role: 'verificador' }, { entity_type: { $in: ['profesional','empresa','organizacion'] } }],
+    };
+    if (sector)     filter.sector = sector;
+    if (membership) filter.membership = membership;
+    if (q) {
+      const re = new RegExp(q.trim().replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&'), 'i');
+      filter.$and = [{ $or: [{ full_name: re }, { company_name: re }, { specialty: re }] }];
+    }
+
+    const pros = await User.find(filter)
+      .select('full_name company_name entity_type sector specialty membership reputation role')
+      .sort({ membership: -1, reputation: -1 })
+      .limit(60)
+      .lean();
+
+    res.json(pros.map(p => ({ ...p, id: String(p._id), _id: undefined })));
+  } catch (e) { next(e); }
 });
 
-/** Métricas para el hero del marketplace. */
-r.get('/stats', async (_req, res) => {
-  const [[pros]] = await pool.query(
-    `SELECT COUNT(*) AS total, AVG(reputation) AS avg_rep
-     FROM users WHERE role='verificador' AND status='activo'`
-  );
-  const [[sectors]] = await pool.query(
-    `SELECT COUNT(DISTINCT sector) AS total
-     FROM users WHERE role='verificador' AND status='activo'
-       AND sector IS NOT NULL AND sector <> ''`
-  );
-  const [[nfts]] = await pool.query('SELECT COUNT(*) AS total FROM nfts');
-  res.json({
-    professionals: Number(pros.total),
-    avg_reputation: Number(pros.avg_rep || 0),
-    sectors: Number(sectors.total),
-    nfts_minted: Number(nfts.total),
-  });
+r.get('/stats', async (_req, res, next) => {
+  try {
+    const [professionals, agg, sectors, nfts_minted] = await Promise.all([
+      User.countDocuments({ status: 'activo', kyc_status: 'verificado',
+        $or: [{ role: 'verificador' }, { membership: { $in: ['profesional','premium'] } }] }),
+      User.aggregate([
+        { $match: { status: 'activo', kyc_status: 'verificado' } },
+        { $group: { _id: null, avg: { $avg: '$reputation' } } },
+      ]),
+      User.distinct('sector', { sector: { $nin: [null, ''] }, kyc_status: 'verificado' }),
+      Nft.countDocuments(),
+    ]);
+    res.json({
+      professionals,
+      avg_reputation: agg[0] ? Number(agg[0].avg.toFixed(1)) : 0,
+      sectors: sectors.length,
+      nfts_minted,
+    });
+  } catch (e) { next(e); }
 });
 
 export default r;

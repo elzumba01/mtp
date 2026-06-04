@@ -1,41 +1,58 @@
-import { createContext, useContext, useEffect, useState } from 'react';
-import { api, getToken, setToken } from './api.js';
+import { createContext, useContext, useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { api, setUnauthorizedHandler } from './api.js';
+import { ROLES } from './lib.js';
 
-const AuthCtx = createContext(null);
+const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
+  const nav = useNavigate();
 
-  // Cargar usuario al iniciar si hay token
   useEffect(() => {
-    if (!getToken()) { setLoading(false); return; }
+    setUnauthorizedHandler(() => {
+      localStorage.removeItem('mtp.token');
+      setUser(null);
+      nav('/login');
+    });
+    const token = localStorage.getItem('mtp.token');
+    if (!token) { setLoading(false); return; }
     api.get('/auth/me')
-      .then(d => setUser(d.user))
-      .catch(() => setToken(null))
+      .then(r => setUser(r.user))
+      .catch(() => localStorage.removeItem('mtp.token'))
       .finally(() => setLoading(false));
   }, []);
 
   async function login(email, password) {
-    const d = await api.post('/auth/login', { email, password });
-    setToken(d.token); setUser(d.user); return d.user;
+    const r = await api.post('/auth/login', { email, password });
+    localStorage.setItem('mtp.token', r.token);
+    setUser(r.user);
+    return r.user;
   }
-  async function register(payload) {
-    const d = await api.post('/auth/register', payload);
-    setToken(d.token); setUser(d.user); return d.user;
-  }
-  function logout() { setToken(null); setUser(null); }
 
-  function roleHome(u = user) {
-    if (!u) return '/';
-    return { admin: '/admin', verificador: '/verificador', usuario: '/u' }[u.role] || '/';
+  async function register(payload) {
+    const r = await api.post('/auth/register', payload);
+    localStorage.setItem('mtp.token', r.token);
+    setUser(r.user);
+    return r.user;
+  }
+
+  function logout() {
+    localStorage.removeItem('mtp.token');
+    setUser(null);
+    nav('/');
+  }
+
+  function roleHome() {
+    return user ? (ROLES[user.role]?.home || '/u') : '/login';
   }
 
   return (
-    <AuthCtx.Provider value={{ user, loading, login, register, logout, roleHome }}>
+    <AuthContext.Provider value={{ user, loading, login, register, logout, roleHome, setUser }}>
       {children}
-    </AuthCtx.Provider>
+    </AuthContext.Provider>
   );
 }
 
-export const useAuth = () => useContext(AuthCtx);
+export function useAuth() { return useContext(AuthContext); }

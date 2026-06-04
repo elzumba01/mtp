@@ -1,34 +1,36 @@
 import { useEffect, useState } from 'react';
+import Sidebar from '../../components/Sidebar.jsx';
 import { api } from '../../api.js';
-import { fmtDate } from '../../lib.js';
 
 export default function History() {
-  const [rows, setRows] = useState([]);
-  useEffect(() => { api.get('/validations/mine').then(setRows).catch(() => setRows([])); }, []);
+  const [history, setHistory] = useState([]);
+  useEffect(() => { api.get('/validations/mine').then(setHistory).catch(() => {}); }, []);
 
   return (
-    <div className="card">
-      <div className="card-head"><h2>Mis dictámenes</h2><span className="dim">{rows.length} total</span></div>
-      {rows.length === 0 ? <p className="muted">Todavía no emitiste dictámenes.</p> : (
-        <div className="table-wrap"><table className="data">
-          <thead><tr><th>Documento</th><th>Tipo doc.</th><th>Validación</th><th>Resultado</th><th>Δ Score</th><th>Fecha</th></tr></thead>
-          <tbody>
-            {rows.map(r => {
-              const c = r.result === 'aprobado' ? 'badge-good' : r.result === 'observado' ? 'badge-warn' : 'badge-risk';
-              return (
-                <tr key={r.id}>
-                  <td><strong>{r.doc_title}</strong></td>
-                  <td>{r.doc_type}</td>
-                  <td>{r.val_type}</td>
-                  <td><span className={`badge ${c}`}>{r.result}</span></td>
-                  <td>{Number(r.score_impact) > 0 ? '+' : ''}{Number(r.score_impact)}</td>
-                  <td className="dim">{fmtDate(r.created_at)}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table></div>
-      )}
+    <div className="layout"><Sidebar />
+      <div className="content">
+        <div className="topbar"><div><h1>Mis dictámenes</h1><p className="muted">{history.length} dictámenes emitidos.</p></div></div>
+        <div className="card">
+          {history.length === 0 ? <p className="muted">Aún no emitiste dictámenes.</p> : (
+            <div className="table-wrap">
+              <table className="data">
+                <thead><tr><th>Fecha</th><th>Documento</th><th>Tipo</th><th>Resultado</th><th>Impacto</th></tr></thead>
+                <tbody>
+                  {history.map(v => (
+                    <tr key={v._id}>
+                      <td className="dim" style={{ fontSize: '.85rem' }}>{new Date(v.created_at).toLocaleDateString()}</td>
+                      <td><strong>{v.document_id?.title || '—'}</strong></td>
+                      <td>{v.val_type}</td>
+                      <td><span className={`badge ${v.result === 'aprobado' ? 'badge-good' : v.result === 'observado' ? 'badge-warn' : 'badge-risk'}`}>{v.result}</span></td>
+                      <td><strong style={{ color: v.score_impact > 0 ? 'var(--green-500)' : 'var(--red-500)' }}>{v.score_impact > 0 ? '+' : ''}{v.score_impact}</strong></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

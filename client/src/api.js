@@ -1,44 +1,45 @@
 /**
- * Cliente HTTP centralizado. Usa fetch nativo (Vite proxea /api → http://localhost:4000).
- * Inyecta automáticamente el JWT y maneja errores con mensajes legibles.
+ * MTP PLATFORM — Cliente fetch + token management.
  */
+const BASE = '/api';
 
-let _token = null;
-export function setToken(t) {
-  _token = t;
-  if (t) localStorage.setItem('mtp_token', t);
-  else localStorage.removeItem('mtp_token');
-}
-export function getToken() {
-  if (_token) return _token;
-  _token = localStorage.getItem('mtp_token');
-  return _token;
-}
+let onUnauthorized = null;
+export function setUnauthorizedHandler(fn) { onUnauthorized = fn; }
 
-async function request(method, url, { body, isForm = false } = {}) {
+function getToken() { return localStorage.getItem('mtp.token'); }
+
+async function request(method, path, { body, formData } = {}) {
   const headers = {};
   const token = getToken();
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  let payload = body;
-  if (body && !isForm) {
+
+  let payload;
+  if (formData) {
+    payload = formData;
+  } else if (body !== undefined) {
     headers['Content-Type'] = 'application/json';
     payload = JSON.stringify(body);
   }
-  const res = await fetch(`/api${url}`, { method, headers, body: payload });
+
+  const res = await fetch(BASE + path, { method, headers, body: payload });
   const text = await res.text();
-  const data = text ? safeJson(text) : null;
+  let data;
+  try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+
   if (!res.ok) {
-    const msg = (data && data.error) || res.statusText || 'Error de red';
-    throw new Error(msg);
+    if (res.status === 401 && onUnauthorized) onUnauthorized();
+    const err = new Error(data?.error || res.statusText);
+    err.status = res.status;
+    err.data = data;
+    throw err;
   }
   return data;
 }
-function safeJson(s) { try { return JSON.parse(s); } catch { return s; } }
 
 export const api = {
-  get:  (u) => request('GET',  u),
-  post: (u, b) => request('POST',  u, { body: b }),
-  patch:(u, b) => request('PATCH', u, { body: b }),
-  del:  (u) => request('DELETE', u),
-  upload: (u, formData) => request('POST', u, { body: formData, isForm: true }),
+  get:    (path)        => request('GET',    path),
+  post:   (path, body)  => request('POST',   path, { body }),
+  patch:  (path, body)  => request('PATCH',  path, { body }),
+  delete: (path)        => request('DELETE', path),
+  upload: (path, formData) => request('POST', path, { formData }),
 };

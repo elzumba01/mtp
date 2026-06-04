@@ -1,90 +1,57 @@
 import { useEffect, useState } from 'react';
+import Sidebar from '../../components/Sidebar.jsx';
 import { api } from '../../api.js';
-import { MEMBERSHIPS, ENTITY_LABELS, fmtDate } from '../../lib.js';
 
 export default function Users() {
   const [users, setUsers] = useState([]);
-  const [filter, setFilter] = useState('');
-  const [err, setErr] = useState(null);
-  const [msg, setMsg] = useState(null);
+  function load() { api.get('/users').then(setUsers).catch(() => {}); }
+  useEffect(load, []);
 
-  async function load() {
-    setUsers(await api.get(`/users${filter ? `?role=${filter}` : ''}`).catch(() => []));
-  }
-  useEffect(() => { load(); /* eslint-disable-line */ }, [filter]);
-
-  async function action(id, fn, label) {
-    setErr(null); setMsg(null);
-    try { await fn(); setMsg(`✓ ${label}`); await load(); }
-    catch (e) { setErr(e.message); }
+  async function update(id, field, value) {
+    try { await api.patch(`/users/${id}/${field}`, { [field]: value }); load(); }
+    catch (e) { alert(e.message); }
   }
 
   return (
-    <div>
-      {err && <div className="alert alert-error">{err}</div>}
-      {msg && <div className="alert alert-success">{msg}</div>}
-
-      <div className="card">
-        <div className="card-head">
-          <h2>Usuarios del ecosistema</h2>
-          <div className="filters">
-            {['', 'usuario', 'verificador', 'admin'].map(r => (
-              <button key={r || 'all'} className={`filter-chip ${filter === r ? 'active' : ''}`}
-                      onClick={() => setFilter(r)}>{r || 'Todos'}</button>
-            ))}
+    <div className="layout"><Sidebar />
+      <div className="content">
+        <div className="topbar"><div><h1>Usuarios &amp; KYC</h1><p className="muted">Gestión de roles, membresías y verificaciones.</p></div></div>
+        <div className="card">
+          <div className="table-wrap">
+            <table className="data">
+              <thead><tr><th>Nombre</th><th>Email</th><th>Rol</th><th>KYC</th><th>Membresía</th><th>Score</th><th>Estado</th></tr></thead>
+              <tbody>
+                {users.map(u => (
+                  <tr key={u.id}>
+                    <td><strong>{u.full_name}</strong></td>
+                    <td className="dim" style={{ fontSize: '.85rem' }}>{u.email}</td>
+                    <td>
+                      <select value={u.role} onChange={e => update(u.id, 'role', e.target.value)} style={{ padding: 4, fontSize: '.82rem' }}>
+                        <option value="admin">admin</option><option value="usuario">usuario</option><option value="verificador">verificador</option>
+                      </select>
+                    </td>
+                    <td>
+                      <select value={u.kyc_status} onChange={e => update(u.id, 'kyc', e.target.value)} style={{ padding: 4, fontSize: '.82rem' }}>
+                        <option value="pendiente">pendiente</option><option value="verificado">verificado</option><option value="rechazado">rechazado</option>
+                      </select>
+                    </td>
+                    <td>
+                      <select value={u.membership} onChange={e => update(u.id, 'membership', e.target.value)} style={{ padding: 4, fontSize: '.82rem' }}>
+                        <option value="basica">básica</option><option value="profesional">profesional</option><option value="premium">premium</option>
+                      </select>
+                    </td>
+                    <td><strong style={{ color: 'var(--cyan-600)' }}>{Math.round(u.reputation)}</strong></td>
+                    <td>
+                      <select value={u.status} onChange={e => update(u.id, 'status', e.target.value)} style={{ padding: 4, fontSize: '.82rem' }}>
+                        <option value="activo">activo</option><option value="suspendido">suspendido</option>
+                      </select>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
-        <div className="table-wrap"><table className="data">
-          <thead><tr><th>Usuario</th><th>Rol</th><th>Entidad</th><th>Reputación</th><th>KYC</th><th>Membresía</th><th>Estado</th><th>Alta</th><th>Acciones</th></tr></thead>
-          <tbody>
-            {users.map(u => {
-              const mem = MEMBERSHIPS[u.membership] || MEMBERSHIPS.basica;
-              return (
-                <tr key={u.id}>
-                  <td><strong>{u.full_name}</strong><br/><span className="dim">{u.email}</span></td>
-                  <td>
-                    <select value={u.role} onChange={e => action(u.id,
-                        () => api.patch(`/users/${u.id}/role`, { role: e.target.value }),
-                        `Rol actualizado a ${e.target.value}`)}>
-                      <option value="usuario">usuario</option>
-                      <option value="verificador">verificador</option>
-                      <option value="admin">admin</option>
-                    </select>
-                  </td>
-                  <td>{ENTITY_LABELS[u.entity_type]}<br/><span className="dim">{u.sector || '—'}</span></td>
-                  <td><strong>{Math.round(Number(u.reputation))}</strong></td>
-                  <td>
-                    <select value={u.kyc_status} onChange={e => action(u.id,
-                        () => api.patch(`/users/${u.id}/kyc`, { status: e.target.value }),
-                        'KYC actualizado')}>
-                      <option value="pendiente">pendiente</option>
-                      <option value="verificado">verificado</option>
-                      <option value="rechazado">rechazado</option>
-                    </select>
-                  </td>
-                  <td>
-                    <select value={u.membership} onChange={e => action(u.id,
-                        () => api.patch(`/users/${u.id}/membership`, { membership: e.target.value }),
-                        'Membresía actualizada')}>
-                      <option value="basica">Básica</option>
-                      <option value="profesional">Profesional</option>
-                      <option value="premium">Premium</option>
-                    </select>
-                  </td>
-                  <td><span className={`badge ${u.status === 'activo' ? 'badge-good' : 'badge-risk'}`}>{u.status}</span></td>
-                  <td className="dim">{fmtDate(u.created_at)}</td>
-                  <td>
-                    <button className="btn btn-ghost btn-sm" onClick={() => action(u.id,
-                        () => api.patch(`/users/${u.id}/status`),
-                        'Estado cambiado')}>
-                      {u.status === 'activo' ? 'Suspender' : 'Activar'}
-                    </button>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table></div>
       </div>
     </div>
   );

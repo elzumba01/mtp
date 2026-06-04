@@ -1,62 +1,49 @@
 import { useEffect, useState } from 'react';
+import Sidebar from '../../components/Sidebar.jsx';
 import { api } from '../../api.js';
-import { MEMBERSHIPS, scoreLabel, fmtDate } from '../../lib.js';
 
 export default function Scoring() {
   const [ranking, setRanking] = useState([]);
   const [recent, setRecent] = useState([]);
   useEffect(() => {
-    api.get('/users/scoring/ranking').then(setRanking).catch(() => setRanking([]));
-    api.get('/users/scoring/recent').then(setRecent).catch(() => setRecent([]));
+    api.get('/users/scoring/ranking').then(setRanking).catch(() => {});
+    api.get('/users/scoring/recent').then(setRecent).catch(() => {});
   }, []);
-
   return (
-    <div className="grid grid-2">
-      <div className="card">
-        <h2>Ranking de reputación</h2>
-        <p className="muted mb">Top 50 cuentas activas — Capa 5: motor de scoring.</p>
-        <div className="table-wrap"><table className="data">
-          <thead><tr><th>#</th><th>Usuario</th><th>Rol</th><th>Membresía</th><th>Score</th></tr></thead>
-          <tbody>
-            {ranking.map((u, i) => {
-              const [lbl, cls] = scoreLabel(Number(u.reputation));
-              const mem = MEMBERSHIPS[u.membership] || MEMBERSHIPS.basica;
-              return (
-                <tr key={u.id}>
-                  <td><strong>{i + 1}</strong></td>
-                  <td>{u.full_name}<br/><span className="dim">{u.sector || ''}</span></td>
-                  <td>{u.role}</td>
-                  <td><span className={`badge mem-${mem.cls}`}>{mem.icon} {mem.label}</span></td>
-                  <td><span className={`badge badge-${cls === 'good' ? 'good' : cls === 'mid' ? 'warn' : 'risk'}`}>
-                    {Math.round(Number(u.reputation))} · {lbl}</span></td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table></div>
-      </div>
-
-      <div className="card">
-        <h2>Movimientos recientes</h2>
-        <p className="muted mb">Últimos 30 ajustes de reputación.</p>
-        <div className="table-wrap"><table className="data">
-          <thead><tr><th>Fecha</th><th>Usuario</th><th>Motivo</th><th>Δ</th></tr></thead>
-          <tbody>
-            {recent.map(r => {
-              const d = Number(r.delta);
-              return (
-                <tr key={r.id}>
-                  <td className="dim">{fmtDate(r.created_at)}</td>
-                  <td>{r.full_name}</td>
-                  <td>{r.reason}</td>
-                  <td><span className={`badge ${d > 0 ? 'badge-good' : d < 0 ? 'badge-risk' : 'badge-neutral'}`}>
-                    {d > 0 ? '+' : ''}{d.toFixed(1)}
-                  </span></td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table></div>
+    <div className="layout"><Sidebar />
+      <div className="content">
+        <div className="topbar"><div><h1>Motor de scoring</h1><p className="muted">Ranking y movimientos recientes.</p></div></div>
+        <div className="grid grid-2">
+          <div className="card">
+            <h3>Top 20 por reputación</h3>
+            <div className="table-wrap mt">
+              <table className="data">
+                <thead><tr><th>#</th><th>Nombre</th><th>Rol</th><th>Score</th></tr></thead>
+                <tbody>
+                  {ranking.map((u, i) => (
+                    <tr key={u.id}><td>{i + 1}</td><td><strong>{u.full_name}</strong></td><td className="dim">{u.role}</td>
+                      <td><strong style={{ color: 'var(--cyan-600)', fontSize: '1.05rem' }}>{Math.round(u.reputation)}</strong></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div className="card">
+            <h3>Movimientos recientes</h3>
+            <ul style={{ listStyle: 'none', padding: 0, marginTop: 12 }}>
+              {recent.map(h => (
+                <li key={h._id} style={{ padding: '10px 0', borderBottom: '1px solid var(--line)' }}>
+                  <div className="row between">
+                    <strong style={{ fontSize: '.92rem' }}>{h.user_id?.full_name}</strong>
+                    <strong style={{ color: h.delta > 0 ? 'var(--green-500)' : 'var(--red-500)' }}>{h.delta > 0 ? '+' : ''}{h.delta}</strong>
+                  </div>
+                  <div className="dim" style={{ fontSize: '.78rem' }}>{h.reason}</div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -1,74 +1,78 @@
+/**
+ * MTP PLATFORM — Validaciones / dictámenes.
+ */
 import { Router } from 'express';
-import pool from '../db.js';
+import { Document, Validation } from '../models/index.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { applyScore, logActivity } from '../helpers.js';
 
 const r = Router();
 
-/** GET /api/validations/queue — documentos pendientes para validar */
-r.get('/queue', requireRole('verificador','admin'), async (req, res) => {
-  const [rows] = await pool.query(
-    `SELECT d.*, u.full_name AS owner_name, u.sector AS owner_sector
-     FROM documents d JOIN users u ON u.id = d.user_id
-     WHERE d.status IN ('cargado','en_analisis_ia','asignado')
-        OR (d.status = 'en_validacion' AND d.assigned_to = ?)
-     ORDER BY d.created_at ASC`,
-    [req.user.id]
-  );
-  res.json(rows);
+r.get('/queue', requireAuth, requireRole('verificador','admin'), async (req, res, next) => {
+  try {
+    const filter = req.user.role === 'admin'
+      ? { status: { $in: ['cargado','en_revision'] } }
+      : { status: 'en_revision', assigned_to: req.user.id };
+    const docs = await Document.find(filter)
+      .populate('user_id', 'full_name company_name reputation membership')
+      .sort({ created_at: 1 })
+      .limit(50)
+      .lean();
+    res.json(docs);
+  } catch (e) { next(e); }
 });
 
-/** POST /api/validations/take/:docId — verificador toma un documento */
-r.post('/take/:docId', requireRole('verificador'), async (req, res) => {
-  await pool.query(
-    `UPDATE documents SET assigned_to = ?, status = 'en_validacion'
-     WHERE id = ? AND status IN ('cargado','en_analisis_ia','asignado')`,
-    [req.user.id, req.params.docId]
-  );
-  await logActivity({ userId: req.user.id, action: 'doc_take', entity: 'document',
-                      entityId: Number(req.params.docId), ip: req.ip });
-  res.json({ ok: true });
+r.post('/take/:docId', requireAuth, requireRole('verificador'), async (req, res, next) => {
+  try {
+    const doc = await Document.findByIdAndUpdate(req.params.docId,
+      { assigned_to: req.user.id, status: 'en_revision' }, { new: true });
+    if (!doc) return res.status(404).json({ error: 'Documento no encontrado' });
+    await logActivity({ userId: req.user.id, action: 'doc_take', entity: 'document', entityId: doc._id,
+                        details: 'Auto-asignación', ip: req.ip });
+    res.json({ ok: true });
+  } catch (e) { next(e); }
 });
 
-/** POST /api/validations — verificador emite dictamen */
-r.post('/', requireRole('verificador'), async (req, res) => {
-  const { document_id, val_type = 'estructural', result, opinion } = req.body || {};
-  if (!document_id || !result || !opinion) {
-    return res.status(400).json({ error: 'Faltan datos del dictamen' });
-  }
-  if (!['aprobado','observado','rechazado'].includes(result)) {
-    return res.status(400).json({ error: 'Resultado inválido' });
-  }
-  const [docRows] = await pool.query('SELECT * FROM documents WHERE id = ?', [document_id]);
-  if (!docRows.length) return res.status(404).json({ error: 'Documento inexistente' });
-  const doc = docRows[0];
+r.post('/', requireAuth, requireRole('verificador'), async (req, res, next) => {
+  try {
+    const { document_id, val_type = 'general', result, opinion = '' } = req.body || {};
+    if (!document_id || !result) return res.status(400).json({ error: 'document_id y result son obligatorios' });
+    if (!['aprobado','observado','rechazado'].includes(result)) return res.status(400).json({ error: 'result inválido' });
 
-  const deltaOwner = result === 'aprobado' ? 8 : (result === 'observado' ? -2 : -10);
-  const newStatus  = result === 'rechazado' ? 'rechazado' : 'validado';
+    const doc = await Document.findById(document_id);
+    if (!doc) return res.status(404).json({ error: 'Documento no encontrado' });
 
-  await pool.query(
-    `INSERT INTO validations (document_id, verifier_id, val_type, result, score_impact, opinion)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    [document_id, req.user.id, val_type, result, deltaOwner, opinion]
-  );
-  await pool.query('UPDATE documents SET status = ? WHERE id = ?', [newStatus, document_id]);
-  await applyScore(doc.user_id, deltaOwner, `Validación ${result} sobre documento #${document_id}`);
-  await applyScore(req.user.id, 0.5, `Emisión de dictamen sobre documento #${document_id}`);
-  await logActivity({ userId: req.user.id, action: 'validation', entity: 'document',
-                      entityId: Number(document_id), details: `Resultado: ${result}`, ip: req.ip });
-  res.json({ ok: true, document_id, result, new_status: newStatus });
+    const score_impact = result === 'aprobado' ? 8 : result === 'observado' ? -3 : -10;
+    const validation = await Validation.create({
+      document_id, verifier_id: req.user.id, val_type, result, score_impact, opinion,
+    });
+
+    if (result === 'aprobado')       doc.status = 'validado';
+    else if (result === 'rechazado') doc.status = 'rechazado';
+    else                             doc.status = 'en_revision';
+    await doc.save();
+
+    await applyScore({
+      userId: doc.user_id, delta: score_impact,
+      reason: `Dictamen "${result}" del verificador ${req.user.id}`,
+      documentId: doc._id, validationId: validation._id,
+    });
+
+    await logActivity({ userId: req.user.id, action: 'doc_validate', entity: 'document', entityId: doc._id,
+                        details: `Dictamen ${result} (${val_type})`, ip: req.ip });
+    res.json(validation);
+  } catch (e) { next(e); }
 });
 
-/** GET /api/validations/mine — historial de dictámenes del verificador */
-r.get('/mine', requireRole('verificador'), async (req, res) => {
-  const [rows] = await pool.query(
-    `SELECT v.*, d.title AS doc_title, d.doc_type
-     FROM validations v JOIN documents d ON d.id = v.document_id
-     WHERE v.verifier_id = ?
-     ORDER BY v.created_at DESC`,
-    [req.user.id]
-  );
-  res.json(rows);
+r.get('/mine', requireAuth, requireRole('verificador'), async (req, res, next) => {
+  try {
+    const vals = await Validation.find({ verifier_id: req.user.id })
+      .populate('document_id', 'title doc_type')
+      .sort({ created_at: -1 })
+      .limit(60)
+      .lean();
+    res.json(vals);
+  } catch (e) { next(e); }
 });
 
 export default r;

@@ -1,146 +1,100 @@
 /**
- * MTP PLATFORM — Integración con ETTIOS BLOCKCHAIN (Chain ID 2237).
- *
- * ETTIOS es una blockchain EVM-compatible, por lo que usamos ethers.js para
- * interactuar con un contrato ERC-721 estándar (MTPValidationNFT.sol).
- *
- * Variables de entorno necesarias:
- *   ETTIOS_RPC_URL            — URL del nodo JSON-RPC de ETTIOS
- *   ETTIOS_CHAIN_ID           — 2237
- *   ETTIOS_CONTRACT_ADDRESS   — dirección del contrato ERC-721 desplegado
- *   ETTIOS_MINTER_PRIVATE_KEY — private key del wallet autorizado a mintear
+ * MTP PLATFORM — Cliente ETTIOS Blockchain (ethers.js v6).
  */
-
 import { ethers } from 'ethers';
 import 'dotenv/config';
 
-// ABI mínima del contrato MTPValidationNFT (ERC-721 + safeMint + tokenURI).
-// Si modificás el contrato, regenerá esta ABI desde Remix/Hardhat.
-const MTP_NFT_ABI = [
+const RPC_URL     = process.env.ETTIOS_RPC_URL || 'https://rpc.ettiosblockchain.io';
+const CHAIN_ID    = Number(process.env.ETTIOS_CHAIN_ID || 2237);
+const CONTRACT    = process.env.ETTIOS_CONTRACT_ADDRESS || null;
+const PRIVATE_KEY = process.env.ETTIOS_PRIVATE_KEY || null;
+
+const NFT_ABI = [
   'function safeMint(address to, string memory uri) public returns (uint256)',
-  'function ownerOf(uint256 tokenId) view returns (address)',
-  'function tokenURI(uint256 tokenId) view returns (string)',
-  'function totalSupply() view returns (uint256)',
-  'function balanceOf(address owner) view returns (uint256)',
+  'function tokenURI(uint256 tokenId) public view returns (string memory)',
+  'function ownerOf(uint256 tokenId) public view returns (address)',
+  'function nextTokenId() public view returns (uint256)',
   'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
 ];
 
-let _provider = null;
-let _wallet = null;
-let _contract = null;
+let provider = null;
+let wallet = null;
+let contract = null;
 
-function provider() {
-  if (!_provider) {
-    const url = process.env.ETTIOS_RPC_URL;
-    if (!url) throw new Error('Falta ETTIOS_RPC_URL en .env');
-    _provider = new ethers.JsonRpcProvider(url, {
-      chainId: Number(process.env.ETTIOS_CHAIN_ID || 2237),
-      name: 'ettios',
-    });
+function init() {
+  if (!provider) {
+    provider = new ethers.JsonRpcProvider(RPC_URL, { chainId: CHAIN_ID, name: 'ettios' });
   }
-  return _provider;
+  if (PRIVATE_KEY && !wallet) wallet = new ethers.Wallet(PRIVATE_KEY, provider);
+  if (CONTRACT && wallet && !contract) {
+    contract = new ethers.Contract(CONTRACT, NFT_ABI, wallet);
+  }
 }
 
-function wallet() {
-  if (!_wallet) {
-    const pk = process.env.ETTIOS_MINTER_PRIVATE_KEY;
-    if (!pk || pk.replace(/0|x/g, '') === '') {
-      throw new Error('Falta ETTIOS_MINTER_PRIVATE_KEY en .env');
-    }
-    _wallet = new ethers.Wallet(pk, provider());
-  }
-  return _wallet;
-}
-
-function contract() {
-  if (!_contract) {
-    const addr = process.env.ETTIOS_CONTRACT_ADDRESS;
-    if (!addr || /^0x0+$/.test(addr)) {
-      throw new Error('Falta ETTIOS_CONTRACT_ADDRESS en .env (deployá MTPValidationNFT.sol primero)');
-    }
-    _contract = new ethers.Contract(addr, MTP_NFT_ABI, wallet());
-  }
-  return _contract;
-}
-
-/** Chequeo de salud: ¿el RPC responde y devuelve el chainId esperado? */
 export async function ettiosHealth() {
+  init();
   try {
-    const net = await provider().getNetwork();
+    if (!provider) return { ok: false, error: 'Provider no configurado' };
+    const network = await provider.getNetwork();
     return {
       ok: true,
-      chainId: Number(net.chainId),
-      expectedChainId: Number(process.env.ETTIOS_CHAIN_ID || 2237),
-      rpc: process.env.ETTIOS_RPC_URL,
-      minter: process.env.ETTIOS_MINTER_PRIVATE_KEY ? wallet().address : null,
-      contract: process.env.ETTIOS_CONTRACT_ADDRESS || null,
+      rpc: RPC_URL,
+      chainId: Number(network.chainId),
+      expectedChainId: CHAIN_ID,
+      contract: CONTRACT,
+      wallet_configured: !!wallet,
+      contract_loaded: !!contract,
     };
   } catch (err) {
-    return { ok: false, error: err.message };
+    return { ok: false, error: err.message, rpc: RPC_URL };
   }
 }
 
-/**
- * Construye los metadatos JSON estilo ERC-721 (compatibles con OpenSea/marketplaces).
- * Estos metadatos se guardan en la DB y se sirven en /api/nft/metadata/:id.
- */
-export function buildMetadata({ doc, validations, owner, fileUrl }) {
+export function buildMetadata({ doc, owner, validationsCount = 0 }) {
   return {
-    name: `MTP Validation #${doc.id} — ${doc.title}`,
-    description:
-      `Documento validado dentro del ecosistema MTP Platform.\n` +
-      `Tipo: ${doc.doc_type} · Propietario: ${owner.full_name}.\n` +
-      `Validaciones profesionales (Capa 3): ${validations.length}.`,
-    image: fileUrl || null,
-    external_url: `https://mtp.platform/documents/${doc.id}`,
+    name: `MTP Certificate · ${doc.title}`,
+    description: doc.description || `Certificación MTP tipo ${doc.doc_type?.toUpperCase()}`,
+    image: `https://api.mtp.platform/nft/image/${doc._id || doc.id}.png`,
+    external_url: `https://mtp.platform/verify/${doc._id || doc.id}`,
     attributes: [
-      { trait_type: 'Document Type', value: doc.doc_type },
-      { trait_type: 'AI Risk', value: doc.ai_risk || 'n/a' },
-      { trait_type: 'Status', value: doc.status },
-      { trait_type: 'Validations', value: validations.length },
-      { trait_type: 'Owner Reputation', value: Number(owner.reputation) },
-      { trait_type: 'Owner Membership', value: owner.membership },
-      { trait_type: 'File SHA-256', value: doc.file_hash || 'n/a' },
-      { trait_type: 'Chain', value: 'ETTIOS' },
-      { trait_type: 'Chain ID', value: Number(process.env.ETTIOS_CHAIN_ID || 2237) },
+      { trait_type: 'Certificate Type',  value: (doc.doc_type || 'otro').toUpperCase() },
+      { trait_type: 'Owner',             value: owner.full_name || owner.company_name },
+      { trait_type: 'KYC Status',        value: owner.kyc_status || 'pendiente' },
+      { trait_type: 'Reputation',        value: Math.round(Number(owner.reputation || 0)) },
+      { trait_type: 'Membership',        value: owner.membership || 'basica' },
+      { trait_type: 'Validations',       value: validationsCount },
+      { trait_type: 'AI Risk',           value: doc.ai_risk || 'bajo' },
+      { trait_type: 'File SHA-256',      value: doc.file_hash || 'unknown' },
+      { trait_type: 'Issued On',         value: (doc.created_at instanceof Date ? doc.created_at : new Date(doc.created_at)).toISOString() },
     ],
   };
 }
 
-/**
- * Mintea un NFT en ETTIOS llamando a safeMint(to, uri) del contrato.
- * Devuelve { tokenId, txHash, blockNumber }.
- */
-export async function mintValidationNFT({ toAddress, metadataUri }) {
-  if (!ethers.isAddress(toAddress)) {
-    throw new Error(`Dirección destino inválida: ${toAddress}`);
-  }
-  const c = contract();
-  const tx = await c.safeMint(toAddress, metadataUri);
+export async function mintValidationNFT({ to, metadata }) {
+  init();
+  if (!contract) throw new Error('Contrato no configurado (revisar ETTIOS_CONTRACT_ADDRESS y ETTIOS_PRIVATE_KEY)');
+  if (!ethers.isAddress(to)) throw new Error(`Dirección destino inválida: ${to}`);
+
+  const metadataUri = `data:application/json;base64,${Buffer.from(JSON.stringify(metadata)).toString('base64')}`;
+
+  const tx = await contract.safeMint(to, metadataUri);
   const receipt = await tx.wait();
 
-  // El tokenId se obtiene del event Transfer(from=0x0, to=toAddress, tokenId)
-  let tokenId = null;
-  for (const log of receipt.logs) {
+  // Extraer tokenId del evento Transfer
+  let tokenId = 'unknown';
+  for (const log of receipt.logs || []) {
     try {
-      const parsed = c.interface.parseLog(log);
-      if (parsed && parsed.name === 'Transfer') {
-        tokenId = parsed.args.tokenId.toString();
-        break;
-      }
-    } catch { /* log no parseable, sigo */ }
+      const parsed = contract.interface.parseLog(log);
+      if (parsed?.name === 'Transfer') { tokenId = parsed.args.tokenId.toString(); break; }
+    } catch { /* ignore */ }
   }
-  if (!tokenId) {
-    // Fallback: derivarlo de totalSupply (asume incremental, suficiente para MVP)
-    const total = await c.totalSupply();
-    tokenId = (total - 1n).toString();
-  }
+
   return {
     tokenId,
-    txHash: receipt.hash,
+    txHash: tx.hash,
+    contractAddress: CONTRACT,
+    chainId: CHAIN_ID,
     blockNumber: receipt.blockNumber,
-    contractAddress: await c.getAddress(),
+    metadataUri,
   };
 }
-
-export const ETTIOS_CHAIN_ID = Number(process.env.ETTIOS_CHAIN_ID || 2237);

@@ -1,127 +1,137 @@
 import { useEffect, useState } from 'react';
-import { api } from '../../api.js';
+import Sidebar from '../../components/Sidebar.jsx';
 import { useAuth } from '../../auth.jsx';
-import { fmtDate } from '../../lib.js';
-
-const COUNTRIES = ['Paraguay','Argentina','España','Brasil','Uruguay','Chile','Colombia','México','Estados Unidos','Otro'];
-const DOC_TYPES = ['DNI','Pasaporte','CI','RUC','NIF','CUIT','CURP','Otro'];
+import { api } from '../../api.js';
 
 const STEPS = [
-  { n: 1, title: 'Email verificado',     desc: 'Completado al crear cuenta' },
-  { n: 2, title: 'Documento de identidad', desc: 'DNI, Pasaporte, Cédula o equivalente' },
-  { n: 3, title: 'Verificación facial',   desc: 'Selfie con liveness (próximamente)' },
-  { n: 4, title: 'Screening AML',         desc: 'Control automático listas SEPRELAD' },
+  ['Datos personales', 'Información básica de identidad'],
+  ['Documento',         'Tipo y número'],
+  ['Wallet (opcional)', 'Para recibir NFTs en ETTIOS'],
+  ['Revisión',          'Confirmación final'],
 ];
 
 export default function KYC() {
-  const { user } = useAuth();
-  const [data, setData] = useState(null);
-  const [form, setForm] = useState({ country: 'Paraguay', doc_type: 'CI', doc_number: '', wallet_address: '' });
+  const { user, setUser } = useAuth();
+  const [step, setStep] = useState(0);
+  const [kyc, setKyc] = useState(null);
+  const [country, setCountry]     = useState('España');
+  const [docType, setDocType]     = useState('DNI');
+  const [docNumber, setDocNumber] = useState('');
+  const [wallet, setWallet]       = useState('');
   const [err, setErr] = useState(null);
-  const [msg, setMsg] = useState(null);
-  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
 
-  async function load() {
-    try { setData(await api.get('/kyc/me')); } catch (e) { setErr(e.message); }
-  }
-  useEffect(() => { load(); }, []);
+  useEffect(() => { api.get('/kyc/me').then(setKyc).catch(() => {}); }, []);
 
-  async function submit(e) {
-    e.preventDefault(); setErr(null); setBusy(true);
+  async function submit() {
+    setErr(null);
     try {
-      const r = await api.post('/kyc', form);
-      setMsg(`✓ Datos KYC enviados — referencia ${r.reference}. Un administrador revisará tu solicitud.`);
-      await load();
+      const r = await api.post('/kyc', { country, doc_type: docType, doc_number: docNumber, wallet_address: wallet || null });
+      setDone(true);
+      const me = await api.get('/auth/me');
+      setUser(me.user);
+      const updated = await api.get('/kyc/me');
+      setKyc(updated);
     } catch (e) { setErr(e.message); }
-    finally { setBusy(false); }
   }
 
-  if (!data) return <div className="card">Cargando…</div>;
-
-  const currentStep = data.kyc_status === 'verificado' ? 4
-                    : (data.kyc_reference ? 3 : 2);
-  const cls = (n) => n < currentStep ? 'done' : n === currentStep ? 'active' : 'pending';
-
-  return (
-    <div>
-      {err && <div className="alert alert-error">{err}</div>}
-      {msg && <div className="alert alert-success">{msg}</div>}
-
-      <div className="card">
-        <div className="card-head">
-          <div>
-            <h2>Verificación de identidad (KYC)</h2>
-            <p className="muted">Capa 1 — controles alineados con SEPRELAD Paraguay y UIF Argentina.</p>
+  if (kyc?.kyc_status === 'verificado') {
+    return (
+      <div className="layout"><Sidebar />
+        <div className="content">
+          <div className="topbar"><div><h1>Verificación KYC</h1><p className="muted">Tu identidad ya fue verificada.</p></div></div>
+          <div className="card" style={{ textAlign: 'center', padding: 40 }}>
+            <div style={{ fontSize: 64, color: 'var(--green-500)' }}>✓</div>
+            <h2>KYC verificado</h2>
+            <p className="muted mt">{kyc.kyc_country} · {kyc.kyc_doc_type} · ref {kyc.kyc_reference}</p>
+            <p className="dim mt">Completado el {new Date(kyc.kyc_completed_at).toLocaleDateString()}</p>
           </div>
-          <span className={`badge ${data.kyc_status === 'verificado' ? 'badge-good' : data.kyc_status === 'rechazado' ? 'badge-risk' : 'badge-warn'}`}>
-            {data.kyc_status === 'verificado' ? '✓ Verificado' : data.kyc_status === 'rechazado' ? 'Rechazado' : 'Pendiente'}
-          </span>
-        </div>
-
-        {/* Steps timeline */}
-        <div className="kyc-steps">
-          {STEPS.map(s => (
-            <div key={s.n} className={`kyc-step kyc-${cls(s.n)}`}>
-              <div className="kyc-step-num">{cls(s.n) === 'done' ? '✓' : s.n}</div>
-              <div>
-                <strong>{s.title}</strong>
-                <p className="muted">{s.desc}</p>
-              </div>
-            </div>
-          ))}
         </div>
       </div>
+    );
+  }
 
-      {data.kyc_status !== 'verificado' && (
-        <div className="card mt">
-          <h2>Enviar datos KYC</h2>
-          <p className="muted mb">Los datos quedan cifrados y se comparten únicamente con el proveedor de verificación
-             y con autoridades competentes ante requerimiento legal.</p>
-          <form onSubmit={submit}>
-            <div className="grid grid-2">
-              <div className="field">
-                <label>País de residencia *</label>
-                <select required value={form.country} onChange={e => setForm(f => ({ ...f, country: e.target.value }))}>
-                  {COUNTRIES.map(c => <option key={c} value={c}>{c}</option>)}
-                </select>
-              </div>
-              <div className="field">
-                <label>Tipo de documento *</label>
-                <select required value={form.doc_type} onChange={e => setForm(f => ({ ...f, doc_type: e.target.value }))}>
-                  {DOC_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-                </select>
-              </div>
-              <div className="field">
-                <label>Número de documento *</label>
-                <input required value={form.doc_number} onChange={e => setForm(f => ({ ...f, doc_number: e.target.value }))} />
-              </div>
-              <div className="field">
-                <label>Billetera EVM (opcional)</label>
-                <input value={form.wallet_address} placeholder="0x…" onChange={e => setForm(f => ({ ...f, wallet_address: e.target.value }))} />
-              </div>
-            </div>
-            <div className="row between mt">
-              <span className="muted">Al enviar, aceptás el procesamiento conforme a la Política de Privacidad.</span>
-              <button className="btn btn-primary" disabled={busy}>{busy ? 'Enviando…' : 'Enviar verificación'}</button>
-            </div>
-          </form>
-        </div>
-      )}
+  return (
+    <div className="layout"><Sidebar />
+      <div className="content">
+        <div className="topbar"><div><h1>Verificación KYC</h1><p className="muted">Conforme a SEPRELAD (Paraguay) y RGPD (UE). Conservamos los datos 10 años.</p></div></div>
 
-      {/* Estado actual */}
-      <div className="card mt">
-        <h2>Estado actual</h2>
+        {err && <div className="alert alert-error">{err}</div>}
+        {done && <div className="alert alert-success">Solicitud enviada. Un admin revisará tus datos en breve.</div>}
+
         <div className="grid grid-2">
-          <div>
-            <div className="dim" style={{ fontSize: 11, textTransform: 'uppercase' }}>Consentimientos</div>
-            <p>Términos: <strong style={{ color: 'var(--cyan-400)' }}>v{data.terms_version || '—'}</strong></p>
-            <p className="dim">Firmados el {fmtDate(data.terms_accepted_at)}</p>
+          <div className="kyc-steps">
+            {STEPS.map(([t, d], i) => (
+              <div key={i} className={`kyc-step ${i < step ? 'kyc-done' : ''} ${i === step ? 'kyc-active' : ''}`}>
+                <div className="kyc-step-num">{i < step ? '✓' : i + 1}</div>
+                <div><strong>{t}</strong><div className="dim" style={{ fontSize: '.8rem' }}>{d}</div></div>
+              </div>
+            ))}
           </div>
-          <div>
-            <div className="dim" style={{ fontSize: 11, textTransform: 'uppercase' }}>Datos KYC</div>
-            <p>Documento: <strong>{data.kyc_doc_type || '—'} {data.kyc_doc_number || ''}</strong></p>
-            <p className="dim">País: {data.kyc_country || '—'}</p>
-            {data.kyc_reference && <p className="dim">Referencia: <code>{data.kyc_reference}</code></p>}
+
+          <div className="card">
+            {step === 0 && (
+              <div>
+                <h3>Datos personales</h3>
+                <p className="muted">Verificá que tu información es correcta.</p>
+                <dl className="verify-dl mt">
+                  <dt>Nombre</dt><dd>{user.full_name}</dd>
+                  <dt>Email</dt><dd>{user.email}</dd>
+                  <dt>Tipo</dt><dd>{user.entity_type}</dd>
+                </dl>
+                <button className="btn btn-primary mt" onClick={() => setStep(1)}>Continuar →</button>
+              </div>
+            )}
+            {step === 1 && (
+              <div>
+                <h3>Documento de identidad</h3>
+                <div className="field"><label>País</label>
+                  <select value={country} onChange={e => setCountry(e.target.value)}>
+                    {['España','Argentina','Paraguay','México','Chile','Uruguay','Colombia','Otro'].map(c => <option key={c}>{c}</option>)}
+                  </select>
+                </div>
+                <div className="field"><label>Tipo</label>
+                  <select value={docType} onChange={e => setDocType(e.target.value)}>
+                    {['DNI','Pasaporte','CI','RUC','NIF','CUIT','CURP','Otro'].map(t => <option key={t}>{t}</option>)}
+                  </select>
+                </div>
+                <div className="field"><label>Número</label>
+                  <input required value={docNumber} onChange={e => setDocNumber(e.target.value)} />
+                </div>
+                <div className="row">
+                  <button className="btn btn-ghost" onClick={() => setStep(0)}>← Atrás</button>
+                  <button className="btn btn-primary" disabled={!docNumber} onClick={() => setStep(2)}>Continuar →</button>
+                </div>
+              </div>
+            )}
+            {step === 2 && (
+              <div>
+                <h3>Wallet EVM (opcional)</h3>
+                <p className="muted">Necesaria solo si querés recibir NFTs en ETTIOS Blockchain.</p>
+                <div className="field"><label>Dirección 0x…</label>
+                  <input value={wallet} onChange={e => setWallet(e.target.value)} placeholder="0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1" style={{ fontFamily: 'ui-monospace,Menlo,monospace' }} />
+                </div>
+                <div className="row">
+                  <button className="btn btn-ghost" onClick={() => setStep(1)}>← Atrás</button>
+                  <button className="btn btn-primary" onClick={() => setStep(3)}>Continuar →</button>
+                </div>
+              </div>
+            )}
+            {step === 3 && (
+              <div>
+                <h3>Revisión</h3>
+                <dl className="verify-dl">
+                  <dt>País</dt><dd>{country}</dd>
+                  <dt>Tipo</dt><dd>{docType}</dd>
+                  <dt>Número</dt><dd>{docNumber}</dd>
+                  <dt>Wallet</dt><dd>{wallet || <span className="dim">(no proporcionada)</span>}</dd>
+                </dl>
+                <div className="row mt">
+                  <button className="btn btn-ghost" onClick={() => setStep(2)}>← Atrás</button>
+                  <button className="btn btn-primary" onClick={submit}>Enviar para verificación →</button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>

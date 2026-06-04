@@ -5,17 +5,17 @@ import { useAuth } from '../auth.jsx';
 export default function Login() {
   const { login, roleHome } = useAuth();
   const nav = useNavigate();
-  const [email, setEmail] = useState('');
-  const [pass, setPass]   = useState('');
-  const [err, setErr]     = useState(null);
-  const [loading, setLoading] = useState(false);
+  const [email, setEmail]       = useState('');
+  const [password, setPassword] = useState('');
+  const [err, setErr]           = useState(null);
+  const [loading, setLoading]   = useState(false);
 
   async function submit(e) {
     e.preventDefault();
     setErr(null); setLoading(true);
     try {
-      const u = await login(email, pass);
-      nav(roleHome(u));
+      await login(email, password);
+      nav(roleHome());
     } catch (e) { setErr(e.message); }
     finally { setLoading(false); }
   }
@@ -23,44 +23,44 @@ export default function Login() {
   return (
     <div className="auth-wrap">
       <div className="auth-box">
-        <div className="auth-brand">
+        <Link to="/" className="auth-brand">
           <div className="brand-mark">M<span>T</span>P</div>
-          <div>
-            <strong style={{ fontFamily: 'var(--font-display)', fontSize: '1.1rem' }}>Acceso al ecosistema</strong>
-            <div className="dim">Ingresá con tu cuenta</div>
-          </div>
-        </div>
-
+          <div><strong style={{ fontSize: '1.05rem' }}>MTP Platform</strong><br /><small style={{ color: 'var(--cyan-600)' }}>Economía Verificable</small></div>
+        </Link>
         <div className="card">
-          {err && <div className="alert alert-error">{err}</div>}
-          <form onSubmit={submit}>
+          <h2>Iniciá sesión</h2>
+          <p className="muted">Acceso para usuarios, verificadores y administradores.</p>
+          {err && <div className="alert alert-error mt">{err}</div>}
+          <form onSubmit={submit} className="mt">
             <div className="field">
               <label>Email</label>
-              <input type="email" required autoFocus value={email} onChange={e => setEmail(e.target.value)} />
+              <input type="email" required value={email} onChange={e => setEmail(e.target.value)} placeholder="vos@mtp.test" />
             </div>
             <div className="field">
               <label>Contraseña</label>
-              <input type="password" required value={pass} onChange={e => setPass(e.target.value)} />
+              <input type="password" required value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••" />
             </div>
-            <button className="btn btn-primary" style={{ width: '100%', justifyContent: 'center' }} disabled={loading}>
-              {loading ? 'Ingresando…' : 'Iniciar sesión'}
+            <button className="btn btn-primary" style={{ width: '100%' }} disabled={loading}>
+              {loading ? 'Ingresando…' : 'Ingresar'}
             </button>
           </form>
-          <p className="muted mt" style={{ textAlign: 'center' }}>
-            ¿No tenés cuenta? <Link to="/register">Registrate</Link>
+          <p className="dim mt" style={{ textAlign: 'center', fontSize: '.85rem' }}>
+            ¿No tenés cuenta? <Link to="/register">Crear cuenta</Link>
           </p>
-          <p className="muted" style={{ textAlign: 'center', marginTop: 6 }}>
-            <Link to="/" style={{ color: 'var(--ink-soft)' }}>← Volver al marketplace</Link>
-          </p>
-
-          <div style={{ marginTop: 20, fontSize: '.78rem', background: 'rgba(0,212,255,.05)',
-                       border: '1px dashed rgba(0,212,255,.25)', borderRadius: 10, padding: 12, lineHeight: 1.7 }}>
-            <strong>Usuarios demo</strong> (contraseña <code>mtp1234</code>):<br/>
-            Admin: <code>admin@mtp.test</code><br/>
-            Usuario: <code>empresa@mtp.test</code><br/>
-            Verificador: <code>contador@mtp.test</code>
-          </div>
         </div>
+        <details style={{ marginTop: 18 }}>
+          <summary className="dim" style={{ cursor: 'pointer', fontSize: '.85rem', textAlign: 'center' }}>Cuentas demo</summary>
+          <div className="card mt" style={{ fontSize: '.82rem' }}>
+            <p className="muted">Password de todas: <code style={{ color: 'var(--cyan-600)' }}>mtp1234</code></p>
+            <ul style={{ paddingLeft: 18, marginTop: 8, color: 'var(--ink-soft)' }}>
+              <li>admin@mtp.test — admin</li>
+              <li>empresa@mtp.test — usuario profesional</li>
+              <li>abogada@mtp.test — verificador premium</li>
+              <li>contador@mtp.test — verificador profesional</li>
+              <li>usuario@mtp.test — usuario básico</li>
+            </ul>
+          </div>
+        </details>
       </div>
     </div>
   );

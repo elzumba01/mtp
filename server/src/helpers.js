@@ -1,35 +1,47 @@
 /**
- * MTP PLATFORM — Capas 4 y 5 (Trazabilidad + Scoring), helpers compartidos.
+ * MTP PLATFORM — Helpers compartidos.
  */
-import pool from './db.js';
+import { User, ScoringHistory, ActivityLog } from './models/index.js';
 
-/** Aplica delta al score de un usuario, clampea 0-100 y graba el historial. */
-export async function applyScore(userId, delta, reason) {
-  const [rows] = await pool.query('SELECT reputation FROM users WHERE id = ?', [userId]);
-  if (!rows.length) return;
-  const prev = Number(rows[0].reputation);
+export async function applyScore({ userId, delta, reason, documentId = null, validationId = null }) {
+  if (!userId || !delta) return;
+  const user = await User.findById(userId);
+  if (!user) return;
+  const prev = Number(user.reputation);
   const next = Math.max(0, Math.min(100, prev + Number(delta)));
-  await pool.query('UPDATE users SET reputation = ? WHERE id = ?', [next, userId]);
-  await pool.query(
-    `INSERT INTO scoring_history (user_id, previous_score, new_score, delta, reason)
-     VALUES (?, ?, ?, ?, ?)`,
-    [userId, prev, next, Number(delta), reason]
-  );
+  user.reputation = next;
+  await user.save();
+  await ScoringHistory.create({
+    user_id: userId, document_id: documentId, validation_id: validationId,
+    prev_score: prev, new_score: next, delta, reason: reason || '',
+  });
+  return { prev, next };
 }
 
-/** Inserta una fila en activity_log (Capa 4 — Trazabilidad estructural). */
-export async function logActivity({ userId, action, entity = null, entityId = null, details = null, ip = null }) {
-  await pool.query(
-    `INSERT INTO activity_log (user_id, action, entity, entity_id, details, ip_address)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    [userId || null, action, entity, entityId, details, ip]
-  );
+export async function logActivity({ userId, action, entity = null, entityId = null, details = '', ip = null }) {
+  try {
+    await ActivityLog.create({
+      user_id: userId, action, entity, entity_id: entityId, details, ip_address: ip,
+    });
+  } catch (e) {
+    console.warn('  ⚠ logActivity fallido:', e.message);
+  }
 }
 
-/** Devuelve etiqueta + clase css para un score dado. */
 export function scoreLabel(score) {
-  if (score >= 80) return ['Confianza alta',  'good'];
-  if (score >= 55) return ['Confianza media', 'mid'];
-  if (score >= 30) return ['Confianza baja',  'low'];
-  return ['Riesgo', 'risk'];
+  const s = Number(score) || 0;
+  if (s >= 85) return { label: 'excelente', cls: 'score-good' };
+  if (s >= 65) return { label: 'sólido',    cls: 'score-mid'  };
+  if (s >= 45) return { label: 'aceptable', cls: 'score-low'  };
+  return { label: 'a mejorar', cls: 'score-risk' };
+}
+
+export function publicUser(u) {
+  if (!u) return null;
+  const obj = u.toObject ? u.toObject() : { ...u };
+  obj.id = String(obj._id);
+  delete obj._id;
+  delete obj.__v;
+  delete obj.password_hash;
+  return obj;
 }

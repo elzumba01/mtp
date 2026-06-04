@@ -1,31 +1,47 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api } from '../../api.js';
+import Sidebar from '../../components/Sidebar.jsx';
 import { useAuth } from '../../auth.jsx';
+import { api } from '../../api.js';
 
-export default function VDashboard() {
+export default function Dashboard() {
   const { user } = useAuth();
   const [queue, setQueue] = useState([]);
-  const [hist, setHist] = useState([]);
+  const [history, setHistory] = useState([]);
+
   useEffect(() => {
-    api.get('/validations/queue').then(setQueue).catch(() => setQueue([]));
-    api.get('/validations/mine').then(setHist).catch(() => setHist([]));
+    api.get('/validations/queue').then(setQueue).catch(() => {});
+    api.get('/validations/mine').then(setHistory).catch(() => {});
   }, []);
-  const aprobados = hist.filter(h => h.result === 'aprobado').length;
 
   return (
-    <div>
-      <div className="grid grid-4">
-        <div className="card stat"><div className="stat-val">{queue.length}</div><div className="stat-lbl">En cola</div></div>
-        <div className="card stat"><div className="stat-val">{hist.length}</div><div className="stat-lbl">Dictámenes emitidos</div></div>
-        <div className="card stat"><div className="stat-val">{aprobados}</div><div className="stat-lbl">Aprobados</div></div>
-        <div className="card stat"><div className="stat-val">{Math.round(Number(user.reputation))}</div><div className="stat-lbl">Reputación</div></div>
-      </div>
-      <div className="card mt">
-        <div className="card-head"><h2>Acciones</h2></div>
-        <div className="row">
-          <Link className="btn btn-primary" to="/verificador/queue">▤ Ver cola de validación</Link>
-          <Link className="btn btn-ghost" to="/verificador/history">Historial de dictámenes</Link>
+    <div className="layout"><Sidebar />
+      <div className="content">
+        <div className="topbar">
+          <div><h1>Hola, {user.full_name}</h1><p className="muted">{user.specialty || 'Verificador'} · sector {user.sector || '—'}</p></div>
+          <div className={`score-pill ${user.reputation >= 85 ? 'score-good' : 'score-mid'}`}>
+            <div className="score-num">{Math.round(user.reputation)}</div><div className="score-lbl">MI SCORE</div>
+          </div>
+        </div>
+
+        <div className="grid grid-3 mt">
+          <div className="card stat"><div className="stat-val">{queue.length}</div><div className="stat-lbl">En mi cola</div></div>
+          <div className="card stat"><div className="stat-val">{history.length}</div><div className="stat-lbl">Dictámenes totales</div></div>
+          <div className="card stat"><div className="stat-val">{history.filter(v => v.result === 'aprobado').length}</div><div className="stat-lbl">Aprobados</div></div>
+        </div>
+
+        <div className="card mt">
+          <div className="card-head"><h3>Próximos en cola</h3><Link to="/verificador/queue" className="btn btn-ghost btn-sm">Ver todos →</Link></div>
+          {queue.length === 0 ? <p className="muted">No tenés documentos asignados.</p> : (
+            <ul style={{ listStyle: 'none', padding: 0 }}>
+              {queue.slice(0, 5).map(d => (
+                <li key={d._id} style={{ padding: '12px 0', borderBottom: '1px solid var(--line)', display: 'flex', justifyContent: 'space-between' }}>
+                  <div><strong>{d.title}</strong><div className="dim" style={{ fontSize: '.78rem' }}>{d.user_id?.full_name} · {(d.doc_type || 'otro').toUpperCase()}</div></div>
+                  <span className="badge badge-warn">{d.status}</span>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       </div>
     </div>

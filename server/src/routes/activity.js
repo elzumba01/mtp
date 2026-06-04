@@ -1,31 +1,31 @@
+/**
+ * MTP PLATFORM — Trazabilidad / activity log.
+ */
 import { Router } from 'express';
-import pool from '../db.js';
+import { ActivityLog, ScoringHistory } from '../models/index.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 
 const r = Router();
 
-/** Mi historial de scoring */
-r.get('/my-scoring', requireAuth, async (req, res) => {
-  const [rows] = await pool.query(
-    `SELECT * FROM scoring_history WHERE user_id = ? ORDER BY created_at DESC LIMIT 50`,
-    [req.user.id]
-  );
-  res.json(rows);
+r.get('/my-scoring', requireAuth, async (req, res, next) => {
+  try {
+    const rows = await ScoringHistory.find({ user_id: req.user.id })
+      .sort({ created_at: -1 }).limit(40).lean();
+    res.json(rows);
+  } catch (e) { next(e); }
 });
 
-/** Traza global (admin) — paginada */
-r.get('/activity', requireRole('admin'), async (req, res) => {
-  const page = Math.max(1, parseInt(req.query.page) || 1);
-  const limit = 30;
-  const offset = (page - 1) * limit;
-  const [rows] = await pool.query(
-    `SELECT a.*, u.full_name FROM activity_log a
-     LEFT JOIN users u ON u.id = a.user_id
-     ORDER BY a.created_at DESC LIMIT ? OFFSET ?`,
-    [limit, offset]
-  );
-  const [[count]] = await pool.query('SELECT COUNT(*) AS c FROM activity_log');
-  res.json({ rows, total: count.c, page, limit });
+r.get('/activity', requireAuth, requireRole('admin'), async (req, res, next) => {
+  try {
+    const { entity = null, limit = 100 } = req.query;
+    const filter = entity ? { entity } : {};
+    const rows = await ActivityLog.find(filter)
+      .populate('user_id', 'full_name email role')
+      .sort({ created_at: -1 })
+      .limit(Math.min(Number(limit) || 100, 500))
+      .lean();
+    res.json(rows);
+  } catch (e) { next(e); }
 });
 
 export default r;
