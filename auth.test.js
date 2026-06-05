@@ -1,68 +1,49 @@
 /**
- * MTP PLATFORM — Bizum sobre Redsys.
+ * MTP PLATFORM — KYC / consentimientos.
  */
+import { Router } from 'express';
 import crypto from 'node:crypto';
-import { generateOrderId } from './redsys.js';
+import { User, LegalConsent } from '../models/index.js';
+import { requireAuth } from '../middleware/auth.js';
+import { logActivity } from '../helpers.js';
 
-const REDSYS_URLS = {
-  test:       'https://sis-t.redsys.es:25443/sis/realizarPago',
-  production: 'https://sis.redsys.es/sis/realizarPago',
-};
+const r = Router();
+const VALID_DOC_TYPES = ['DNI','Pasaporte','CI','RUC','NIF','CUIT','CURP','Otro'];
 
-const ENV = process.env.REDSYS_ENVIRONMENT || 'test';
-const MERCHANT_CODE = process.env.REDSYS_MERCHANT_CODE || '';
-const TERMINAL = process.env.REDSYS_TERMINAL || '1';
-const CURRENCY = process.env.REDSYS_CURRENCY || '978';
-const SECRET_KEY = process.env.REDSYS_SECRET_KEY || '';
-const BIZUM_ENABLED = process.env.BIZUM_ENABLED === 'true';
+r.post('/', requireAuth, async (req, res, next) => {
+  try {
+    const { country, doc_type, doc_number, wallet_address } = req.body || {};
+    if (!country || !doc_type || !doc_number) return res.status(400).json({ error: 'País, tipo y número de documento son obligatorios' });
+    if (!VALID_DOC_TYPES.includes(doc_type)) return res.status(400).json({ error: 'Tipo de documento inválido' });
 
-function tripleDesEncrypt(msg, key) {
-  const iv = Buffer.alloc(8, 0);
-  const cipher = crypto.createCipheriv('des-ede3-cbc', Buffer.from(key, 'base64'), iv);
-  cipher.setAutoPadding(false);
-  const buf = Buffer.from(msg, 'utf8');
-  const padded = Buffer.concat([buf, Buffer.alloc(8 - (buf.length % 8 || 8), 0)]);
-  return Buffer.concat([cipher.update(padded), cipher.final()]);
-}
-function sign(b64, orderId) {
-  const dk = tripleDesEncrypt(orderId, SECRET_KEY);
-  return crypto.createHmac('sha256', dk).update(b64).digest('base64');
-}
+    const reference = 'MTP-KYC-' + crypto.randomBytes(4).toString('hex').toUpperCase();
+    const update = {
+      kyc_country: country, kyc_doc_type: doc_type, kyc_doc_number: doc_number,
+      kyc_provider: 'manual', kyc_reference: reference, kyc_status: 'pendiente',
+    };
+    if (wallet_address) update.wallet_address = wallet_address;
+    await User.findByIdAndUpdate(req.user.id, update);
 
-export function bizumHealth() {
-  return { configured: !!(MERCHANT_CODE && SECRET_KEY), enabled: BIZUM_ENABLED, environment: ENV };
-}
+    await logActivity({ userId: req.user.id, action: 'kyc_submit', entity: 'user', entityId: req.user.id,
+                        details: `KYC enviado · ${doc_type} ${country} · ref ${reference}`, ip: req.ip });
+    res.json({ ok: true, reference, status: 'pendiente' });
+  } catch (e) { next(e); }
+});
 
-export function createBizumPayment({ orderId, amount, phone, description, userId }) {
-  if (!MERCHANT_CODE || !SECRET_KEY) throw new Error('Bizum no configurado.');
-  if (!BIZUM_ENABLED) throw new Error('Bizum no está habilitado en este contrato.');
-  if (!phone) throw new Error('Para Bizum, el teléfono es obligatorio');
-  if (!/^[+]?[0-9]{9,15}$/.test(phone.replace(/\s/g, ''))) throw new Error('Teléfono inválido');
+r.get('/me', requireAuth, async (req, res, next) => {
+  try {
+    const u = await User.findById(req.user.id)
+      .select('kyc_status kyc_country kyc_doc_type kyc_doc_number kyc_provider kyc_reference kyc_completed_at terms_accepted_at terms_version privacy_accepted_at kyc_consent')
+      .lean();
+    res.json(u || {});
+  } catch (e) { next(e); }
+});
 
-  const payload = {
-    DS_MERCHANT_AMOUNT: String(amount),
-    DS_MERCHANT_ORDER: orderId || generateOrderId(),
-    DS_MERCHANT_MERCHANTCODE: MERCHANT_CODE,
-    DS_MERCHANT_CURRENCY: CURRENCY,
-    DS_MERCHANT_TRANSACTIONTYPE: '0',
-    DS_MERCHANT_TERMINAL: TERMINAL,
-    DS_MERCHANT_PAYMETHODS: 'z',
-    DS_MERCHANT_P2F: phone.replace(/[\s+]/g, ''),
-    DS_MERCHANT_MERCHANTURL: process.env.REDSYS_NOTIFICATION_URL || '',
-    DS_MERCHANT_URLOK:       process.env.REDSYS_OK_URL || '',
-    DS_MERCHANT_URLKO:       process.env.REDSYS_KO_URL || '',
-    DS_MERCHANT_PRODUCTDESCRIPTION: description || 'MTP Platform — Bizum',
-    DS_MERCHANT_TITULAR: userId || 'usuario',
-    DS_MERCHANT_CONSUMERLANGUAGE: '001',
-  };
+r.get('/consents', requireAuth, async (req, res, next) => {
+  try {
+    const rows = await LegalConsent.find({ user_id: req.user.id }).sort({ accepted_at: -1 }).lean();
+    res.json(rows);
+  } catch (e) { next(e); }
+});
 
-  const b64 = Buffer.from(JSON.stringify(payload)).toString('base64');
-  return {
-    url: REDSYS_URLS[ENV],
-    Ds_SignatureVersion: 'HMAC_SHA256_V1',
-    Ds_MerchantParameters: b64,
-    Ds_Signature: sign(b64, payload.DS_MERCHANT_ORDER),
-    payment_method: 'bizum',
-    phone_masked: phone.slice(0, 3) + '****' + phone.slice(-3),
-  };
-}
+export default r;

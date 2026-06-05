@@ -1,49 +1,49 @@
-import { useEffect, useState } from 'react';
-import Sidebar from '../../components/Sidebar.jsx';
-import { api } from '../../api.js';
+/**
+ * MTP PLATFORM — Cliente fetch + token management.
+ *
+ * BASE se resuelve así:
+ *  - En local con Vite: '/api' (proxy hacia http://localhost:4000)
+ *  - En producción: VITE_API_URL del .env, ej. https://mtp-api.onrender.com
+ */
+const BASE = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '') + '/api';
 
-export default function Documents() {
-  const [docs, setDocs] = useState([]);
-  const [users, setUsers] = useState([]);
+let onUnauthorized = null;
+export function setUnauthorizedHandler(fn) { onUnauthorized = fn; }
 
-  function load() { api.get('/documents').then(setDocs).catch(() => {}); }
-  useEffect(() => { load(); api.get('/users').then(rs => setUsers(rs.filter(u => u.role === 'verificador'))).catch(() => {}); }, []);
+function getToken() { return localStorage.getItem('mtp.token'); }
 
-  async function assign(docId, verifierId) {
-    if (!verifierId) return;
-    try { await api.patch(`/documents/${docId}/assign`, { verifier_id: verifierId }); load(); }
-    catch (e) { alert(e.message); }
+async function request(method, path, { body, formData } = {}) {
+  const headers = {};
+  const token = getToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+
+  let payload;
+  if (formData) {
+    payload = formData;
+  } else if (body !== undefined) {
+    headers['Content-Type'] = 'application/json';
+    payload = JSON.stringify(body);
   }
 
-  return (
-    <div className="layout"><Sidebar />
-      <div className="content">
-        <div className="topbar"><div><h1>Documentos</h1><p className="muted">Asignación de verificadores a documentos cargados.</p></div></div>
-        <div className="card">
-          <div className="table-wrap">
-            <table className="data">
-              <thead><tr><th>Título</th><th>Propietario</th><th>Tipo</th><th>Estado</th><th>Verificador</th><th>Asignar</th></tr></thead>
-              <tbody>
-                {docs.map(d => (
-                  <tr key={d._id}>
-                    <td><strong>{d.title}</strong></td>
-                    <td>{d.user_id?.full_name}</td>
-                    <td><span className="badge badge-info">{(d.doc_type || 'otro').toUpperCase()}</span></td>
-                    <td><span className={`badge ${d.status === 'validado' ? 'badge-good' : d.status === 'rechazado' ? 'badge-risk' : 'badge-warn'}`}>{d.status}</span></td>
-                    <td>{d.assigned_to?.full_name || <span className="dim">— sin asignar —</span>}</td>
-                    <td>
-                      <select onChange={e => assign(d._id, e.target.value)} defaultValue="" style={{ padding: 4, fontSize: '.82rem' }}>
-                        <option value="" disabled>— elegir —</option>
-                        {users.map(u => <option key={u.id} value={u.id}>{u.full_name}</option>)}
-                      </select>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
+  const res = await fetch(BASE + path, { method, headers, body: payload });
+  const text = await res.text();
+  let data;
+  try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+
+  if (!res.ok) {
+    if (res.status === 401 && onUnauthorized) onUnauthorized();
+    const err = new Error(data?.error || res.statusText);
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
+  return data;
 }
+
+export const api = {
+  get:    (path)        => request('GET',    path),
+  post:   (path, body)  => request('POST',   path, { body }),
+  patch:  (path, body)  => request('PATCH',  path, { body }),
+  delete: (path)        => request('DELETE', path),
+  upload: (path, formData) => request('POST', path, { formData }),
+};

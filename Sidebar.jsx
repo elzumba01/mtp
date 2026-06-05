@@ -1,46 +1,23 @@
-name: CI
-on:
-  push: { branches: [main] }
-  pull_request: { branches: [main] }
-
-jobs:
-  # ─── Frontend build ──────────────────────────────────────────
-  frontend:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: '22', cache: 'npm', cache-dependency-path: client/package-lock.json }
-      - run: cd client && npm ci
-      - run: cd client && npm run build
-
-  # ─── Backend tests unitarios (rápidos, sin red) ───────────────
-  backend-unit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: '22', cache: 'npm', cache-dependency-path: server/package-lock.json }
-      - run: cd server && npm ci
-      - run: cd server && cp .env.example .env
-      - run: cd server && npm run test:unit
-      - run: cd server && node --check src/index.js
-
-  # ─── Backend tests de integración con MongoMemoryServer ──────
-  backend-integration:
-    runs-on: ubuntu-latest
-    services:
-      mongo:
-        image: mongo:7
-        ports: ['27017:27017']
-        options: --health-cmd "mongosh --eval 'db.adminCommand({ping:1})'" --health-interval 10s --health-timeout 5s --health-retries 5
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: '22', cache: 'npm', cache-dependency-path: server/package-lock.json }
-      - run: cd server && npm ci
-      - run: cd server && cp .env.example .env
-      - run: cd server && npm run test:int
-        env:
-          MONGOMS_DISABLE_POSTINSTALL: 1
-          MONGOMS_SYSTEM_BINARY: /usr/bin/mongod
+{
+  "name": "mtp-platform",
+  "version": "3.0.0",
+  "private": true,
+  "description": "MTP Platform — Infraestructura Global de Economía Verificable",
+  "author": "Lic. Pablo Rutigliano · Aston Mining S.L.",
+  "license": "MIT",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "install:all": "npm install && (cd client && npm install) && (cd server && npm install)",
+    "client":      "cd client && npm run dev",
+    "server":      "cd server && npm run dev",
+    "init-db":     "cd server && npm run init-db",
+    "build":       "cd client && npm run build",
+    "test":        "cd server && npm test",
+    "test:unit":   "cd server && npm run test:unit",
+    "test:int":    "cd server && npm run test:int",
+    "start":       "concurrently \"npm:server\" \"npm:client\"",
+    "docker:up":   "docker-compose up -d",
+    "docker:down": "docker-compose down"
+  },
+  "devDependencies": { "concurrently": "^9.1.0" }
+}

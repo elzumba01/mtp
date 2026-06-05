@@ -1,100 +1,193 @@
 /**
- * MTP PLATFORM — Cliente ETTIOS Blockchain (ethers.js v6).
+ * MTP PLATFORM — Rutas de pagos.
  */
-import { ethers } from 'ethers';
-import 'dotenv/config';
+import { Router } from 'express';
+import { Payment, User } from '../models/index.js';
+import { requireAuth } from '../middleware/auth.js';
+import { logActivity } from '../helpers.js';
+import { createPayment, verifyNotification, generateOrderId, redsysHealth } from '../payments/redsys.js';
+import { createBizumPayment, bizumHealth } from '../payments/bizum.js';
+import { cryptoHealth, getCryptoQuote, verifyCryptoTransfer, supportedNetworks } from '../payments/crypto.js';
+import { oracleHealth } from '../payments/oracle.js';
 
-const RPC_URL     = process.env.ETTIOS_RPC_URL || 'https://rpc.ettiosblockchain.io';
-const CHAIN_ID    = Number(process.env.ETTIOS_CHAIN_ID || 2237);
-const CONTRACT    = process.env.ETTIOS_CONTRACT_ADDRESS || null;
-const PRIVATE_KEY = process.env.ETTIOS_PRIVATE_KEY || null;
+const r = Router();
+const PRICES = {
+  profesional: { amount: 2900, label: 'Membresía Profesional (mensual)' },
+  premium:     { amount: 7900, label: 'Membresía Premium (mensual)' },
+  nft:         { amount: 500,  label: 'Minteo de NFT en ETTIOS' },
+};
 
-const NFT_ABI = [
-  'function safeMint(address to, string memory uri) public returns (uint256)',
-  'function tokenURI(uint256 tokenId) public view returns (string memory)',
-  'function ownerOf(uint256 tokenId) public view returns (address)',
-  'function nextTokenId() public view returns (uint256)',
-  'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
-];
+r.get('/health', async (_req, res) => res.json({
+  redsys: redsysHealth(),
+  bizum:  bizumHealth(),
+  crypto: cryptoHealth(),
+  oracle: await oracleHealth(),
+  prices: PRICES,
+  crypto_networks: supportedNetworks(),
+}));
 
-let provider = null;
-let wallet = null;
-let contract = null;
-
-function init() {
-  if (!provider) {
-    provider = new ethers.JsonRpcProvider(RPC_URL, { chainId: CHAIN_ID, name: 'ettios' });
-  }
-  if (PRIVATE_KEY && !wallet) wallet = new ethers.Wallet(PRIVATE_KEY, provider);
-  if (CONTRACT && wallet && !contract) {
-    contract = new ethers.Contract(CONTRACT, NFT_ABI, wallet);
-  }
-}
-
-export async function ettiosHealth() {
-  init();
+r.post('/redsys/create', requireAuth, async (req, res, next) => {
   try {
-    if (!provider) return { ok: false, error: 'Provider no configurado' };
-    const network = await provider.getNetwork();
-    return {
+    const { concept } = req.body || {};
+    if (!PRICES[concept]) return res.status(400).json({ error: 'concept inválido' });
+    const orderId = generateOrderId();
+    const { amount, label } = PRICES[concept];
+    await Payment.create({ order_id: orderId, user_id: req.user.id, method: 'redsys', concept, amount, status: 'pendiente' });
+    const form = createPayment({ orderId, amount, description: label, userId: req.user.id });
+    await logActivity({ userId: req.user.id, action: 'payment_init', entity: 'payment', entityId: orderId,
+                        details: `Redsys · ${concept} · ${amount/100} €`, ip: req.ip });
+    res.json({ order_id: orderId, method: 'redsys', amount, label, form });
+  } catch (e) { next(e); }
+});
+
+r.post('/bizum/create', requireAuth, async (req, res, next) => {
+  try {
+    const { concept, phone } = req.body || {};
+    if (!PRICES[concept]) return res.status(400).json({ error: 'concept inválido' });
+    if (!phone) return res.status(400).json({ error: 'phone es obligatorio' });
+    const orderId = generateOrderId();
+    const { amount, label } = PRICES[concept];
+    await Payment.create({ order_id: orderId, user_id: req.user.id, method: 'bizum', concept, amount, phone, status: 'pendiente' });
+    const form = createBizumPayment({ orderId, amount, phone, description: label, userId: req.user.id });
+    await logActivity({ userId: req.user.id, action: 'payment_init', entity: 'payment', entityId: orderId,
+                        details: `Bizum · ${concept} · ${amount/100} €`, ip: req.ip });
+    res.json({ order_id: orderId, method: 'bizum', amount, label, phone: form.phone_masked, form });
+  } catch (e) { next(e); }
+});
+
+r.post('/notify', async (req, res, next) => {
+  try {
+    const v = verifyNotification(req.body);
+    if (!v.valid) return res.status(400).send('FIRMA_INVALIDA');
+    const order = await Payment.findOne({ order_id: v.orderId });
+    if (!order) return res.status(404).send('ORDEN_NO_ENCONTRADA');
+    if (order.status !== 'pendiente') return res.send('OK');
+
+    order.status = v.status;
+    order.response_code = v.response_code;
+    order.authorization_code = v.authorization_code;
+    order.completed_at = new Date();
+    await order.save();
+
+    if (v.status === 'aprobado' && (order.concept === 'profesional' || order.concept === 'premium')) {
+      await User.findByIdAndUpdate(order.user_id, { membership: order.concept });
+    }
+    await logActivity({ userId: order.user_id, action: 'payment_' + v.status, entity: 'payment',
+                        entityId: v.orderId, details: `${order.method} · ${order.concept} · ${order.amount/100} €`, ip: req.ip });
+    res.send('OK');
+  } catch (e) { next(e); }
+});
+
+r.get('/mine', requireAuth, async (req, res, next) => {
+  try {
+    const rows = await Payment.find({ user_id: req.user.id }).sort({ created_at: -1 }).limit(50).lean();
+    res.json(rows);
+  } catch (e) { next(e); }
+});
+
+r.get('/:orderId', requireAuth, async (req, res, next) => {
+  try {
+    const row = await Payment.findOne({ order_id: req.params.orderId, user_id: req.user.id }).lean();
+    if (!row) return res.status(404).json({ error: 'Orden no encontrada' });
+    res.json(row);
+  } catch (e) { next(e); }
+});
+
+// ═══════════ CRIPTO (USDC / USDT) ════════════════════════════════════
+//
+// Flujo: quote → usuario envía la transferencia desde su wallet → confirm
+//
+
+/** POST /api/payments/crypto/quote — devuelve la dirección destino + monto exacto */
+r.post('/crypto/quote', requireAuth, async (req, res, next) => {
+  try {
+    const { concept, chain_id, token } = req.body || {};
+    if (!PRICES[concept]) return res.status(400).json({ error: 'concept inválido' });
+    if (!chain_id)        return res.status(400).json({ error: 'chain_id es obligatorio' });
+    if (!['usdc','usdt'].includes(token)) return res.status(400).json({ error: 'token debe ser usdc o usdt' });
+
+    const orderId = generateOrderId();
+    const { amount, label } = PRICES[concept];
+
+    const quote = await getCryptoQuote({ amountCents: amount, chainId: Number(chain_id), token });
+
+    await Payment.create({
+      order_id: orderId, user_id: req.user.id, method: 'crypto',
+      concept, amount, status: 'pendiente',
+      crypto_chain_id: Number(chain_id),
+      crypto_token: token.toUpperCase(),
+      crypto_amount_units: quote.amount_units,
+      crypto_merchant_address: quote.merchant_address,
+    });
+
+    await logActivity({
+      userId: req.user.id, action: 'payment_init', entity: 'payment', entityId: orderId,
+      details: `Cripto · ${concept} · ${quote.amount_display} ${quote.token} en ${quote.network}`, ip: req.ip,
+    });
+
+    res.json({ order_id: orderId, method: 'crypto', amount, label, quote });
+  } catch (e) {
+    if (e.message.includes('configurado') || e.message.includes('soportada') || e.message.includes('disponible')) {
+      return res.status(400).json({ error: e.message });
+    }
+    next(e);
+  }
+});
+
+/** POST /api/payments/crypto/confirm — usuario pega el tx hash y validamos on-chain */
+r.post('/crypto/confirm', requireAuth, async (req, res, next) => {
+  try {
+    const { order_id, tx_hash } = req.body || {};
+    if (!order_id || !tx_hash) return res.status(400).json({ error: 'order_id y tx_hash son obligatorios' });
+
+    const order = await Payment.findOne({ order_id, user_id: req.user.id });
+    if (!order) return res.status(404).json({ error: 'Orden no encontrada' });
+    if (order.method !== 'crypto') return res.status(400).json({ error: 'La orden no es de pago en cripto' });
+    if (order.status === 'aprobado') return res.json({ ok: true, status: 'aprobado', note: 'Orden ya confirmada' });
+
+    const result = await verifyCryptoTransfer({
+      txHash: tx_hash,
+      chainId: order.crypto_chain_id,
+      token: order.crypto_token.toLowerCase(),
+      expectedAmountUnits: order.crypto_amount_units,
+    });
+
+    if (!result.ok) {
+      return res.status(400).json({ error: result.error, ...result });
+    }
+
+    // Marcar la orden como aprobada
+    order.status = 'aprobado';
+    order.crypto_tx_hash = tx_hash;
+    order.crypto_block_number = result.block_number;
+    order.crypto_confirmations = result.confirmations;
+    order.crypto_from_address  = result.from;
+    order.completed_at = new Date();
+    await order.save();
+
+    // Activar membresía si corresponde
+    if (order.concept === 'profesional' || order.concept === 'premium') {
+      await User.findByIdAndUpdate(order.user_id, { membership: order.concept });
+    }
+
+    await logActivity({
+      userId: req.user.id, action: 'payment_aprobado', entity: 'payment', entityId: order_id,
+      details: `Cripto ${order.crypto_token} en ${result.network} · ${result.amount_display} · tx ${tx_hash.slice(0,12)}…`,
+      ip: req.ip,
+    });
+
+    res.json({
       ok: true,
-      rpc: RPC_URL,
-      chainId: Number(network.chainId),
-      expectedChainId: CHAIN_ID,
-      contract: CONTRACT,
-      wallet_configured: !!wallet,
-      contract_loaded: !!contract,
-    };
-  } catch (err) {
-    return { ok: false, error: err.message, rpc: RPC_URL };
-  }
-}
+      status: 'aprobado',
+      tx_hash,
+      block_number: result.block_number,
+      confirmations: result.confirmations,
+      explorer_url: result.explorer_url,
+      amount: result.amount_display,
+      token: result.token,
+      network: result.network,
+    });
+  } catch (e) { next(e); }
+});
 
-export function buildMetadata({ doc, owner, validationsCount = 0 }) {
-  return {
-    name: `MTP Certificate · ${doc.title}`,
-    description: doc.description || `Certificación MTP tipo ${doc.doc_type?.toUpperCase()}`,
-    image: `https://api.mtp.platform/nft/image/${doc._id || doc.id}.png`,
-    external_url: `https://mtp.platform/verify/${doc._id || doc.id}`,
-    attributes: [
-      { trait_type: 'Certificate Type',  value: (doc.doc_type || 'otro').toUpperCase() },
-      { trait_type: 'Owner',             value: owner.full_name || owner.company_name },
-      { trait_type: 'KYC Status',        value: owner.kyc_status || 'pendiente' },
-      { trait_type: 'Reputation',        value: Math.round(Number(owner.reputation || 0)) },
-      { trait_type: 'Membership',        value: owner.membership || 'basica' },
-      { trait_type: 'Validations',       value: validationsCount },
-      { trait_type: 'AI Risk',           value: doc.ai_risk || 'bajo' },
-      { trait_type: 'File SHA-256',      value: doc.file_hash || 'unknown' },
-      { trait_type: 'Issued On',         value: (doc.created_at instanceof Date ? doc.created_at : new Date(doc.created_at)).toISOString() },
-    ],
-  };
-}
-
-export async function mintValidationNFT({ to, metadata }) {
-  init();
-  if (!contract) throw new Error('Contrato no configurado (revisar ETTIOS_CONTRACT_ADDRESS y ETTIOS_PRIVATE_KEY)');
-  if (!ethers.isAddress(to)) throw new Error(`Dirección destino inválida: ${to}`);
-
-  const metadataUri = `data:application/json;base64,${Buffer.from(JSON.stringify(metadata)).toString('base64')}`;
-
-  const tx = await contract.safeMint(to, metadataUri);
-  const receipt = await tx.wait();
-
-  // Extraer tokenId del evento Transfer
-  let tokenId = 'unknown';
-  for (const log of receipt.logs || []) {
-    try {
-      const parsed = contract.interface.parseLog(log);
-      if (parsed?.name === 'Transfer') { tokenId = parsed.args.tokenId.toString(); break; }
-    } catch { /* ignore */ }
-  }
-
-  return {
-    tokenId,
-    txHash: tx.hash,
-    contractAddress: CONTRACT,
-    chainId: CHAIN_ID,
-    blockNumber: receipt.blockNumber,
-    metadataUri,
-  };
-}
+export default r;

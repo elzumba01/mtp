@@ -1,32 +1,25 @@
-# Deployment
+/**
+ * MTP PLATFORM — Helpers de autenticación.
+ */
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import 'dotenv/config';
 
-## Local
+const JWT_SECRET     = process.env.JWT_SECRET     || 'dev_secret_change_me';
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
 
-```bash
-docker-compose up -d                              # Mongo + Mongo Express
-cd server && npm install && cp .env.example .env && npm run init-db && npm run dev
-cd ../client && npm install && npm run dev
-```
+export async function hashPassword(plain) {
+  return bcrypt.hash(plain, 10);
+}
 
-## Cloud
+export async function verifyPassword(plain, hash) {
+  return bcrypt.compare(plain, hash);
+}
 
-**Frontend** → Vercel / Netlify
-- Build: `npm run build` · Output: `dist`
-- Variable: `VITE_API_URL=https://api.tu-dominio.com` si el backend está en otro dominio
+export function signToken(payload) {
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+}
 
-**Backend** → Render / Railway / Fly.io
-- Root: `server`
-- Build: `npm install`
-- Start: `npm start`
-- Variables: copiar tu `.env`
-
-**Database** → MongoDB Atlas (free tier 512MB)
-- Connection string: `MONGO_URI=mongodb+srv://USER:PASS@cluster.xxx.mongodb.net/mtp_platform`
-
-## Smart contract en ETTIOS
-
-1. Abrí https://remix.ethereum.org
-2. Pegá `server/contracts/MTPValidationNFT.sol`
-3. Compilá con Solidity 0.8.20
-4. Conectá MetaMask a ETTIOS (Chain ID 2237, RPC de Adrián Sirio)
-5. Deploy → copiar address → pegarla en `ETTIOS_CONTRACT_ADDRESS` del `.env`
+export function verifyToken(token) {
+  return jwt.verify(token, JWT_SECRET);
+}

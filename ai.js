@@ -1,105 +1,62 @@
 /**
- * MTP PLATFORM — Servidor Express.
+ * MTP PLATFORM — Marketplace público.
  */
-import 'dotenv/config';
-import express from 'express';
-import cors from 'cors';
+import { Router } from 'express';
+import { User, Nft } from '../models/index.js';
 
-import { connectMongo, getDbStatus, friendlyMongoError } from './db.js';
-import { ettiosHealth } from './blockchain.js';
-import { optionalAuth } from './middleware/auth.js';
+const r = Router();
 
-import authRoutes         from './routes/auth.js';
-import marketplaceRoutes  from './routes/marketplace.js';
-import documentRoutes     from './routes/documents.js';
-import validationRoutes   from './routes/validations.js';
-import userRoutes         from './routes/users.js';
-import activityRoutes     from './routes/activity.js';
-import nftRoutes          from './routes/nft.js';
-import kycRoutes          from './routes/kyc.js';
-import verifyRoutes       from './routes/verify.js';
-import paymentsRoutes     from './routes/payments.js';
-
-const app = express();
-const PORT = Number(process.env.PORT || 4000);
-
-app.use(cors({
-  origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : true,
-  credentials: false,
-}));
-app.use(express.json({ limit: '2mb' }));
-app.use(express.urlencoded({ extended: true, limit: '2mb' }));
-app.use(optionalAuth);
-
-if (process.env.NODE_ENV !== 'production') {
-  app.use((req, _res, next) => {
-    if (req.path.startsWith('/api')) {
-      const start = Date.now();
-      process.nextTick(() => console.log(`  ${req.method.padEnd(6)} ${req.path}  (${Date.now() - start}ms)`));
-    }
-    next();
-  });
-}
-
-app.use('/api/auth',        authRoutes);
-app.use('/api/marketplace', marketplaceRoutes);
-app.use('/api/documents',   documentRoutes);
-app.use('/api/validations', validationRoutes);
-app.use('/api/users',       userRoutes);
-app.use('/api/activity',    activityRoutes);
-app.use('/api/nft',         nftRoutes);
-app.use('/api/kyc',         kycRoutes);
-app.use('/api/verify',      verifyRoutes);
-app.use('/api/payments',    paymentsRoutes);
-
-app.get('/api/health', async (_req, res) => {
-  const db    = await getDbStatus();
-  const chain = await ettiosHealth();
-  res.json({
-    ok: db.ok,
-    app: 'MTP Platform', version: '3.0.0',
-    timestamp: new Date().toISOString(),
-    db,
-    blockchain: { name: 'ETTIOS', chainId: Number(process.env.ETTIOS_CHAIN_ID || 2237), ...chain },
-  });
-});
-
-app.use('/api/*', (_req, res) => res.status(404).json({ error: 'Endpoint no encontrado' }));
-
-app.use((err, _req, res, _next) => {
-  const mongo = err ? friendlyMongoError(err) : null;
-  if (mongo) {
-    console.error(`  ✗ Mongo ${err.code || err.name}: ${err.message}`);
-    return res.status(mongo.status).json({ error: mongo.message });
-  }
-  if (err?.message && /File too large|Tipo de archivo/.test(err.message)) {
-    return res.status(400).json({ error: err.message });
-  }
-  if (err?.type === 'entity.parse.failed') return res.status(400).json({ error: 'JSON inválido en el body' });
-  console.error('✗ Error no manejado:', err);
-  res.status(500).json({ error: 'Error interno del servidor' });
-});
-
-async function start() {
-  console.log('\n╔══════════════════════════════════════════════════════╗');
-  console.log('║       MTP PLATFORM — API (React + Mongo)             ║');
-  console.log('╚══════════════════════════════════════════════════════╝\n');
+r.get('/sectors', async (_req, res, next) => {
   try {
-    await connectMongo();
-  } catch {
-    console.error('\n  ✗ El servidor no puede arrancar sin MongoDB.');
-    console.error('  ✗ Ejecutá "npm run init-db" para crear índices + seed.\n');
-    process.exit(1);
-  }
-  app.listen(PORT, () => {
-    console.log(`\n✓ API en http://localhost:${PORT}`);
-    console.log(`  Chain: ETTIOS (id ${process.env.ETTIOS_CHAIN_ID || 2237})`);
-    console.log(`  CORS:  ${process.env.CORS_ORIGIN || '* (todos)'}\n`);
-  });
-}
+    const sectors = await User.distinct('sector', { sector: { $nin: [null, ''] } });
+    res.json(sectors.sort());
+  } catch (e) { next(e); }
+});
 
-process.on('SIGTERM', () => process.exit(0));
-process.on('SIGINT',  () => process.exit(0));
-process.on('unhandledRejection', err => console.error('✗ Unhandled rejection:', err));
+r.get('/professionals', async (req, res, next) => {
+  try {
+    const { sector, membership, q } = req.query;
+    const filter = {
+      status: 'activo',
+      kyc_status: 'verificado',
+      $or: [{ role: 'verificador' }, { entity_type: { $in: ['profesional','empresa','organizacion'] } }],
+    };
+    if (sector)     filter.sector = sector;
+    if (membership) filter.membership = membership;
+    if (q) {
+      const re = new RegExp(q.trim().replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&'), 'i');
+      filter.$and = [{ $or: [{ full_name: re }, { company_name: re }, { specialty: re }] }];
+    }
 
-start();
+    const pros = await User.find(filter)
+      .select('full_name company_name entity_type sector specialty membership reputation role')
+      .sort({ membership: -1, reputation: -1 })
+      .limit(60)
+      .lean();
+
+    res.json(pros.map(p => ({ ...p, id: String(p._id), _id: undefined })));
+  } catch (e) { next(e); }
+});
+
+r.get('/stats', async (_req, res, next) => {
+  try {
+    const [professionals, agg, sectors, nfts_minted] = await Promise.all([
+      User.countDocuments({ status: 'activo', kyc_status: 'verificado',
+        $or: [{ role: 'verificador' }, { membership: { $in: ['profesional','premium'] } }] }),
+      User.aggregate([
+        { $match: { status: 'activo', kyc_status: 'verificado' } },
+        { $group: { _id: null, avg: { $avg: '$reputation' } } },
+      ]),
+      User.distinct('sector', { sector: { $nin: [null, ''] }, kyc_status: 'verificado' }),
+      Nft.countDocuments(),
+    ]);
+    res.json({
+      professionals,
+      avg_reputation: agg[0] ? Number(agg[0].avg.toFixed(1)) : 0,
+      sectors: sectors.length,
+      nfts_minted,
+    });
+  } catch (e) { next(e); }
+});
+
+export default r;

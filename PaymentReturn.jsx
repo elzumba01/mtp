@@ -1,115 +1,47 @@
 import { useEffect, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
 import Sidebar from '../../components/Sidebar.jsx';
-import { useAuth } from '../../auth.jsx';
 import { api } from '../../api.js';
-import { shortAddr } from '../../lib.js';
 
-export default function DocumentDetail() {
-  const { id } = useParams();
-  const { user } = useAuth();
-  const [doc, setDoc] = useState(null);
-  const [minting, setMinting] = useState(false);
-  const [err, setErr] = useState(null);
+export default function Documents() {
+  const [docs, setDocs] = useState([]);
+  const [users, setUsers] = useState([]);
 
-  function load() { api.get(`/documents/${id}`).then(setDoc).catch(e => setErr(e.message)); }
-  useEffect(load, [id]);
+  function load() { api.get('/documents').then(setDocs).catch(() => {}); }
+  useEffect(() => { load(); api.get('/users').then(rs => setUsers(rs.filter(u => u.role === 'verificador'))).catch(() => {}); }, []);
 
-  async function mintNft() {
-    setErr(null); setMinting(true);
-    try { await api.post(`/nft/mint/${id}`); load(); }
-    catch (e) { setErr(e.message); }
-    finally { setMinting(false); }
+  async function assign(docId, verifierId) {
+    if (!verifierId) return;
+    try { await api.patch(`/documents/${docId}/assign`, { verifier_id: verifierId }); load(); }
+    catch (e) { alert(e.message); }
   }
-
-  if (!doc) return (
-    <div className="layout"><Sidebar />
-      <div className="content"><p className="muted">{err || 'Cargando…'}</p></div>
-    </div>
-  );
-
-  const isOwner = String(doc.user_id?._id) === user.id;
 
   return (
     <div className="layout"><Sidebar />
       <div className="content">
-        <div className="topbar">
-          <div>
-            <Link to="/u/documents" className="dim" style={{ fontSize: '.85rem' }}>← Volver a mis documentos</Link>
-            <h1 style={{ marginTop: 4 }}>{doc.title}</h1>
-            <div className="row mt">
-              <span className="badge badge-info">{(doc.doc_type || 'otro').toUpperCase()}</span>
-              <span className={`badge ${doc.status === 'validado' ? 'badge-good' : doc.status === 'rechazado' ? 'badge-risk' : 'badge-warn'}`}>{doc.status}</span>
-              <span className={`badge ${doc.ai_risk === 'bajo' ? 'badge-good' : doc.ai_risk === 'medio' ? 'badge-warn' : 'badge-risk'}`}>IA: {doc.ai_risk}</span>
-            </div>
+        <div className="topbar"><div><h1>Documentos</h1><p className="muted">Asignación de verificadores a documentos cargados.</p></div></div>
+        <div className="card">
+          <div className="table-wrap">
+            <table className="data">
+              <thead><tr><th>Título</th><th>Propietario</th><th>Tipo</th><th>Estado</th><th>Verificador</th><th>Asignar</th></tr></thead>
+              <tbody>
+                {docs.map(d => (
+                  <tr key={d._id}>
+                    <td><strong>{d.title}</strong></td>
+                    <td>{d.user_id?.full_name}</td>
+                    <td><span className="badge badge-info">{(d.doc_type || 'otro').toUpperCase()}</span></td>
+                    <td><span className={`badge ${d.status === 'validado' ? 'badge-good' : d.status === 'rechazado' ? 'badge-risk' : 'badge-warn'}`}>{d.status}</span></td>
+                    <td>{d.assigned_to?.full_name || <span className="dim">— sin asignar —</span>}</td>
+                    <td>
+                      <select onChange={e => assign(d._id, e.target.value)} defaultValue="" style={{ padding: 4, fontSize: '.82rem' }}>
+                        <option value="" disabled>— elegir —</option>
+                        {users.map(u => <option key={u.id} value={u.id}>{u.full_name}</option>)}
+                      </select>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        </div>
-
-        {err && <div className="alert alert-error">{err}</div>}
-
-        {doc.nft ? (
-          <div className="nft-card">
-            <div className="row between">
-              <div>
-                <span className="nft-pill">★ NFT EN ETTIOS</span>
-                <h3 style={{ marginTop: 10 }}>Token #{doc.nft.token_id}</h3>
-                <p className="muted">Chain {doc.nft.chain_id} · Block #{doc.nft.block_number}</p>
-              </div>
-              <Link to={`/verify/${doc.nft.token_id}`} className="btn btn-gold btn-sm">Ver verificador público →</Link>
-            </div>
-            <div className="mt">
-              <div className="dim" style={{ fontSize: '.78rem', marginBottom: 4 }}>TX Hash</div>
-              <code className="tx-hash">{doc.nft.tx_hash}</code>
-            </div>
-          </div>
-        ) : doc.status === 'validado' && isOwner ? (
-          <div className="alert alert-info">
-            <strong>El documento está validado.</strong> Podés mintear el NFT certificado en ETTIOS Blockchain.
-            <div className="mt"><button className="btn btn-gold" onClick={mintNft} disabled={minting}>{minting ? 'Minteando…' : '★ Mintear NFT (5 €)'}</button></div>
-          </div>
-        ) : null}
-
-        <div className="grid grid-2 mt">
-          <div className="card">
-            <h3>Información del documento</h3>
-            <dl className="verify-dl mt">
-              <dt>Descripción</dt><dd>{doc.description || '—'}</dd>
-              <dt>Propietario</dt><dd>{doc.user_id?.full_name} {doc.user_id?.company_name && <span className="dim">· {doc.user_id.company_name}</span>}</dd>
-              <dt>Wallet</dt><dd>{doc.user_id?.wallet_address ? <code className="tx-hash" style={{ display: 'inline-block', fontSize: '.7rem' }}>{shortAddr(doc.user_id.wallet_address)}</code> : '—'}</dd>
-              <dt>Verificador</dt><dd>{doc.assigned_to?.full_name || '— sin asignar —'}</dd>
-              <dt>Hash SHA-256</dt><dd><code className="tx-hash" style={{ display: 'inline-block', fontSize: '.7rem' }}>{doc.file_hash || '—'}</code></dd>
-              <dt>Tamaño</dt><dd>{(doc.file_size / 1024).toFixed(1)} KB</dd>
-              <dt>Cargado</dt><dd>{new Date(doc.created_at).toLocaleString()}</dd>
-            </dl>
-          </div>
-          <div className="card">
-            <h3>Análisis IA</h3>
-            <p className="muted mt">{doc.ai_summary}</p>
-            <div className="mt">
-              <strong style={{ fontSize: '.85rem' }}>Nivel de riesgo: </strong>
-              <span className={`badge ${doc.ai_risk === 'bajo' ? 'badge-good' : doc.ai_risk === 'medio' ? 'badge-warn' : 'badge-risk'}`}>{doc.ai_risk}</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="card mt">
-          <h3>Dictámenes profesionales ({doc.validations?.length || 0})</h3>
-          {doc.validations?.length === 0 ? (
-            <p className="muted mt">Sin dictámenes todavía. Esperando asignación de verificador.</p>
-          ) : (
-            <div className="mt">
-              {doc.validations.map(v => (
-                <div key={v._id} style={{ padding: '14px 0', borderBottom: '1px solid var(--line)' }}>
-                  <div className="row between">
-                    <strong>{v.verifier_id?.full_name}</strong>
-                    <span className={`badge ${v.result === 'aprobado' ? 'badge-good' : v.result === 'observado' ? 'badge-warn' : 'badge-risk'}`}>{v.result}</span>
-                  </div>
-                  <p className="dim" style={{ fontSize: '.78rem' }}>{v.verifier_id?.specialty} · {v.val_type}</p>
-                  {v.opinion && <p className="muted mt">"{v.opinion}"</p>}
-                </div>
-              ))}
-            </div>
-          )}
         </div>
       </div>
     </div>

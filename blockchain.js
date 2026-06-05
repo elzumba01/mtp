@@ -1,13 +1,46 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#18bfe6"/>
-      <stop offset="40%" stop-color="#4f83ff"/>
-      <stop offset="75%" stop-color="#8b5cf6"/>
-      <stop offset="100%" stop-color="#d79b2b"/>
-    </linearGradient>
-  </defs>
-  <rect width="64" height="64" rx="14" fill="url(#g)"/>
-  <rect x="10" y="10" width="44" height="44" rx="10" fill="none" stroke="rgba(255,255,255,.8)" stroke-width="1.5"/>
-  <text x="32" y="40" text-anchor="middle" font-family="system-ui" font-weight="900" font-size="20" fill="#fff">M</text>
-</svg>
+/**
+ * MTP PLATFORM — Multer + SHA-256.
+ */
+import multer from 'multer';
+import path from 'node:path';
+import fs from 'node:fs';
+import crypto from 'node:crypto';
+
+const UPLOAD_DIR = process.env.UPLOAD_DIR || './uploads';
+const MAX_BYTES  = Number(process.env.MAX_UPLOAD_BYTES || 8 * 1024 * 1024);
+
+if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+const ALLOWED = new Set([
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'image/png', 'image/jpeg', 'image/webp',
+  'text/plain', 'application/json',
+]);
+
+const storage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
+  filename:    (_req, file, cb) => {
+    const ext = path.extname(file.originalname).slice(0, 10);
+    cb(null, `${Date.now()}-${crypto.randomBytes(6).toString('hex')}${ext}`);
+  },
+});
+
+export const upload = multer({
+  storage,
+  limits: { fileSize: MAX_BYTES },
+  fileFilter: (_req, file, cb) => {
+    if (!ALLOWED.has(file.mimetype)) {
+      return cb(new Error(`Tipo de archivo no permitido: ${file.mimetype}`));
+    }
+    cb(null, true);
+  },
+});
+
+export function sha256File(filePath) {
+  const buf = fs.readFileSync(filePath);
+  return crypto.createHash('sha256').update(buf).digest('hex');
+}

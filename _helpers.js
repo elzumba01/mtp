@@ -1,95 +1,83 @@
 /**
- * MTP PLATFORM — Redsys / CaixaBank Cyberpac.
+ * MTP PLATFORM — Rutas de autenticación.
  */
-import crypto from 'node:crypto';
+import { Router } from 'express';
+import { User, LegalConsent } from '../models/index.js';
+import { hashPassword, verifyPassword, signToken } from '../auth.js';
+import { logActivity, publicUser } from '../helpers.js';
+import { requireAuth } from '../middleware/auth.js';
 
-const REDSYS_URLS = {
-  test:       'https://sis-t.redsys.es:25443/sis/realizarPago',
-  production: 'https://sis.redsys.es/sis/realizarPago',
-};
+const r = Router();
+const TERMS_VERSION = '2026.05';
 
-const ENV = process.env.REDSYS_ENVIRONMENT || 'test';
-const MERCHANT_CODE = process.env.REDSYS_MERCHANT_CODE || '';
-const TERMINAL = process.env.REDSYS_TERMINAL || '1';
-const CURRENCY = process.env.REDSYS_CURRENCY || '978';
-const SECRET_KEY = process.env.REDSYS_SECRET_KEY || '';
+r.post('/register', async (req, res, next) => {
+  try {
+    const {
+      full_name, email, password,
+      entity_type = 'empresa', company_name = null, document_id = null,
+      sector = null, as_verifier = false, specialty = null,
+      membership = 'basica', wallet_address = null,
+      accept_terms = false, accept_privacy = false, accept_kyc = false,
+    } = req.body || {};
 
-export function redsysHealth() {
-  return {
-    configured: !!(MERCHANT_CODE && SECRET_KEY),
-    environment: ENV,
-    endpoint: REDSYS_URLS[ENV],
-    merchant_code: MERCHANT_CODE ? `***${MERCHANT_CODE.slice(-4)}` : null,
-  };
-}
+    if (!full_name || !email || !password) return res.status(400).json({ error: 'Nombre, email y contraseña son obligatorios' });
+    if (!accept_terms || !accept_privacy || !accept_kyc) return res.status(400).json({ error: 'Debés aceptar Términos, Privacidad y KYC/AML' });
+    if (password.length < 6) return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' });
 
-export function generateOrderId() {
-  return Date.now().toString().slice(-4) + crypto.randomBytes(4).toString('hex').toUpperCase();
-}
+    const exists = await User.findOne({ email: email.toLowerCase() });
+    if (exists) return res.status(409).json({ error: 'Ya existe una cuenta con ese email' });
 
-function tripleDesEncrypt(message, key) {
-  const iv = Buffer.alloc(8, 0);
-  const cipher = crypto.createCipheriv('des-ede3-cbc', Buffer.from(key, 'base64'), iv);
-  cipher.setAutoPadding(false);
-  const buf = Buffer.from(message, 'utf8');
-  const padded = Buffer.concat([buf, Buffer.alloc(8 - (buf.length % 8 || 8), 0)]);
-  return Buffer.concat([cipher.update(padded), cipher.final()]);
-}
+    const role = as_verifier ? 'verificador' : 'usuario';
+    const user = await User.create({
+      full_name, email: email.toLowerCase(),
+      password_hash: await hashPassword(password),
+      role, entity_type, company_name, document_id, sector,
+      specialty: as_verifier ? specialty : null,
+      membership, wallet_address,
+      terms_accepted_at: new Date(), terms_version: TERMS_VERSION,
+      privacy_accepted_at: new Date(), kyc_consent: true,
+    });
 
-function sign(payloadBase64, orderId) {
-  const derivedKey = tripleDesEncrypt(orderId, SECRET_KEY);
-  return crypto.createHmac('sha256', derivedKey).update(payloadBase64).digest('base64');
-}
+    const ua = (req.headers['user-agent'] || '').slice(0, 255);
+    await LegalConsent.insertMany([
+      { user_id: user._id, document_type: 'terms',   version: TERMS_VERSION, ip_address: req.ip, user_agent: ua },
+      { user_id: user._id, document_type: 'privacy', version: TERMS_VERSION, ip_address: req.ip, user_agent: ua },
+      { user_id: user._id, document_type: 'kyc',     version: TERMS_VERSION, ip_address: req.ip, user_agent: ua },
+    ]);
 
-export function createPayment({ orderId, amount, description, userId }) {
-  if (!MERCHANT_CODE || !SECRET_KEY) throw new Error('Redsys no está configurado. Revisá REDSYS_MERCHANT_CODE y REDSYS_SECRET_KEY.');
-  if (!orderId || !amount) throw new Error('orderId y amount son obligatorios');
+    await logActivity({ userId: user._id, action: 'register', entity: 'user', entityId: user._id,
+                        details: `Alta de cuenta (${role}) — consentimientos v${TERMS_VERSION}`, ip: req.ip });
 
-  const payload = {
-    DS_MERCHANT_AMOUNT: String(amount),
-    DS_MERCHANT_ORDER: orderId,
-    DS_MERCHANT_MERCHANTCODE: MERCHANT_CODE,
-    DS_MERCHANT_CURRENCY: CURRENCY,
-    DS_MERCHANT_TRANSACTIONTYPE: '0',
-    DS_MERCHANT_TERMINAL: TERMINAL,
-    DS_MERCHANT_MERCHANTURL: process.env.REDSYS_NOTIFICATION_URL || '',
-    DS_MERCHANT_URLOK:       process.env.REDSYS_OK_URL || '',
-    DS_MERCHANT_URLKO:       process.env.REDSYS_KO_URL || '',
-    DS_MERCHANT_PRODUCTDESCRIPTION: description || 'MTP Platform',
-    DS_MERCHANT_TITULAR: userId || 'usuario',
-    DS_MERCHANT_CONSUMERLANGUAGE: '001',
-  };
+    const token = signToken({ uid: String(user._id), role: user.role });
+    res.json({ user: publicUser(user), token });
+  } catch (e) { next(e); }
+});
 
-  const payloadBase64 = Buffer.from(JSON.stringify(payload)).toString('base64');
-  return {
-    url: REDSYS_URLS[ENV],
-    Ds_SignatureVersion: 'HMAC_SHA256_V1',
-    Ds_MerchantParameters: payloadBase64,
-    Ds_Signature: sign(payloadBase64, orderId),
-  };
-}
+r.post('/login', async (req, res, next) => {
+  try {
+    const { email, password } = req.body || {};
+    if (!email || !password) return res.status(400).json({ error: 'Email y contraseña son obligatorios' });
 
-export function verifyNotification(body) {
-  const params = body.Ds_MerchantParameters;
-  const receivedSig = body.Ds_Signature;
-  if (!params || !receivedSig) return { valid: false, error: 'Faltan parámetros' };
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) return res.status(401).json({ error: 'Credenciales inválidas' });
+    if (user.status === 'suspendido') return res.status(403).json({ error: 'Cuenta suspendida' });
 
-  const decoded = JSON.parse(Buffer.from(params, 'base64').toString('utf8'));
-  const orderId = decoded.Ds_Order || decoded.DS_MERCHANT_ORDER;
-  if (!orderId) return { valid: false, error: 'Orden no encontrada' };
+    const ok = await verifyPassword(password, user.password_hash);
+    if (!ok) return res.status(401).json({ error: 'Credenciales inválidas' });
 
-  const expectedSig = sign(params, orderId).replace(/\+/g, '-').replace(/\//g, '_');
-  const incomingSig = receivedSig.replace(/\+/g, '-').replace(/\//g, '_');
+    await logActivity({ userId: user._id, action: 'login', entity: 'user', entityId: user._id, details: 'Inicio de sesión', ip: req.ip });
 
-  const valid = expectedSig === incomingSig;
-  const responseCode = Number(decoded.Ds_Response || 9999);
-  const status = valid && responseCode < 100 ? 'aprobado' : valid ? 'denegado' : 'firma_invalida';
+    const token = signToken({ uid: String(user._id), role: user.role });
+    res.json({ user: publicUser(user), token });
+  } catch (e) { next(e); }
+});
 
-  return {
-    valid, status, orderId,
-    amount: Number(decoded.Ds_Amount || 0),
-    response_code: responseCode,
-    authorization_code: decoded.Ds_AuthorisationCode || null,
-    decoded,
-  };
-}
+r.get('/me', requireAuth, async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
+    res.json({ user: publicUser(user) });
+  } catch (e) { next(e); }
+});
+
+export default r;

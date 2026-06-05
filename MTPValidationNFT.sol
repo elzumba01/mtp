@@ -1,191 +1,113 @@
 /**
- * MTP PLATFORM — Rutas de pagos.
+ * MTP PLATFORM — Tests de autenticación + consentimientos legales.
  */
-import { Router } from 'express';
-import { Payment, User } from '../models/index.js';
-import { requireAuth } from '../middleware/auth.js';
-import { logActivity } from '../helpers.js';
-import { createPayment, verifyNotification, generateOrderId, redsysHealth } from '../payments/redsys.js';
-import { createBizumPayment, bizumHealth } from '../payments/bizum.js';
-import { cryptoHealth, getCryptoQuote, verifyCryptoTransfer, supportedNetworks } from '../payments/crypto.js';
+import { describe, test, before, after, beforeEach } from 'node:test';
+import assert from 'node:assert/strict';
+import request from 'supertest';
+import { setupTestDb, teardownTestDb, clearCollections, getApp } from './_helpers.js';
 
-const r = Router();
-const PRICES = {
-  profesional: { amount: 2900, label: 'Membresía Profesional (mensual)' },
-  premium:     { amount: 7900, label: 'Membresía Premium (mensual)' },
-  nft:         { amount: 500,  label: 'Minteo de NFT en ETTIOS' },
-};
+let app;
 
-r.get('/health', (_req, res) => res.json({
-  redsys: redsysHealth(),
-  bizum:  bizumHealth(),
-  crypto: cryptoHealth(),
-  prices: PRICES,
-  crypto_networks: supportedNetworks(),
-}));
-
-r.post('/redsys/create', requireAuth, async (req, res, next) => {
-  try {
-    const { concept } = req.body || {};
-    if (!PRICES[concept]) return res.status(400).json({ error: 'concept inválido' });
-    const orderId = generateOrderId();
-    const { amount, label } = PRICES[concept];
-    await Payment.create({ order_id: orderId, user_id: req.user.id, method: 'redsys', concept, amount, status: 'pendiente' });
-    const form = createPayment({ orderId, amount, description: label, userId: req.user.id });
-    await logActivity({ userId: req.user.id, action: 'payment_init', entity: 'payment', entityId: orderId,
-                        details: `Redsys · ${concept} · ${amount/100} €`, ip: req.ip });
-    res.json({ order_id: orderId, method: 'redsys', amount, label, form });
-  } catch (e) { next(e); }
+before(async () => {
+  await setupTestDb();
+  app = await getApp();
 });
 
-r.post('/bizum/create', requireAuth, async (req, res, next) => {
-  try {
-    const { concept, phone } = req.body || {};
-    if (!PRICES[concept]) return res.status(400).json({ error: 'concept inválido' });
-    if (!phone) return res.status(400).json({ error: 'phone es obligatorio' });
-    const orderId = generateOrderId();
-    const { amount, label } = PRICES[concept];
-    await Payment.create({ order_id: orderId, user_id: req.user.id, method: 'bizum', concept, amount, phone, status: 'pendiente' });
-    const form = createBizumPayment({ orderId, amount, phone, description: label, userId: req.user.id });
-    await logActivity({ userId: req.user.id, action: 'payment_init', entity: 'payment', entityId: orderId,
-                        details: `Bizum · ${concept} · ${amount/100} €`, ip: req.ip });
-    res.json({ order_id: orderId, method: 'bizum', amount, label, phone: form.phone_masked, form });
-  } catch (e) { next(e); }
-});
+after(async () => { await teardownTestDb(); });
+beforeEach(async () => { await clearCollections(); });
 
-r.post('/notify', async (req, res, next) => {
-  try {
-    const v = verifyNotification(req.body);
-    if (!v.valid) return res.status(400).send('FIRMA_INVALIDA');
-    const order = await Payment.findOne({ order_id: v.orderId });
-    if (!order) return res.status(404).send('ORDEN_NO_ENCONTRADA');
-    if (order.status !== 'pendiente') return res.send('OK');
-
-    order.status = v.status;
-    order.response_code = v.response_code;
-    order.authorization_code = v.authorization_code;
-    order.completed_at = new Date();
-    await order.save();
-
-    if (v.status === 'aprobado' && (order.concept === 'profesional' || order.concept === 'premium')) {
-      await User.findByIdAndUpdate(order.user_id, { membership: order.concept });
-    }
-    await logActivity({ userId: order.user_id, action: 'payment_' + v.status, entity: 'payment',
-                        entityId: v.orderId, details: `${order.method} · ${order.concept} · ${order.amount/100} €`, ip: req.ip });
-    res.send('OK');
-  } catch (e) { next(e); }
-});
-
-r.get('/mine', requireAuth, async (req, res, next) => {
-  try {
-    const rows = await Payment.find({ user_id: req.user.id }).sort({ created_at: -1 }).limit(50).lean();
-    res.json(rows);
-  } catch (e) { next(e); }
-});
-
-r.get('/:orderId', requireAuth, async (req, res, next) => {
-  try {
-    const row = await Payment.findOne({ order_id: req.params.orderId, user_id: req.user.id }).lean();
-    if (!row) return res.status(404).json({ error: 'Orden no encontrada' });
-    res.json(row);
-  } catch (e) { next(e); }
-});
-
-// ═══════════ CRIPTO (USDC / USDT) ════════════════════════════════════
-//
-// Flujo: quote → usuario envía la transferencia desde su wallet → confirm
-//
-
-/** POST /api/payments/crypto/quote — devuelve la dirección destino + monto exacto */
-r.post('/crypto/quote', requireAuth, async (req, res, next) => {
-  try {
-    const { concept, chain_id, token } = req.body || {};
-    if (!PRICES[concept]) return res.status(400).json({ error: 'concept inválido' });
-    if (!chain_id)        return res.status(400).json({ error: 'chain_id es obligatorio' });
-    if (!['usdc','usdt'].includes(token)) return res.status(400).json({ error: 'token debe ser usdc o usdt' });
-
-    const orderId = generateOrderId();
-    const { amount, label } = PRICES[concept];
-
-    const quote = getCryptoQuote({ amountCents: amount, chainId: Number(chain_id), token });
-
-    await Payment.create({
-      order_id: orderId, user_id: req.user.id, method: 'crypto',
-      concept, amount, status: 'pendiente',
-      crypto_chain_id: Number(chain_id),
-      crypto_token: token.toUpperCase(),
-      crypto_amount_units: quote.amount_units,
-      crypto_merchant_address: quote.merchant_address,
+describe('POST /api/auth/register', () => {
+  test('rechaza registro sin los 3 consentimientos legales', async () => {
+    const r = await request(app).post('/api/auth/register').send({
+      full_name: 'Pepe', email: 'pepe@test.com', password: 'secret123',
+      accept_terms: true, accept_privacy: true, accept_kyc: false,
     });
+    assert.equal(r.status, 400);
+    assert.match(r.body.error, /Términos.*Privacidad.*KYC/);
+  });
 
-    await logActivity({
-      userId: req.user.id, action: 'payment_init', entity: 'payment', entityId: orderId,
-      details: `Cripto · ${concept} · ${quote.amount_display} ${quote.token} en ${quote.network}`, ip: req.ip,
+  test('rechaza password de menos de 6 caracteres', async () => {
+    const r = await request(app).post('/api/auth/register').send({
+      full_name: 'Pepe', email: 'pepe@test.com', password: '123',
+      accept_terms: true, accept_privacy: true, accept_kyc: true,
     });
+    assert.equal(r.status, 400);
+    assert.match(r.body.error, /6 caracteres/);
+  });
 
-    res.json({ order_id: orderId, method: 'crypto', amount, label, quote });
-  } catch (e) {
-    if (e.message.includes('configurado') || e.message.includes('soportada') || e.message.includes('disponible')) {
-      return res.status(400).json({ error: e.message });
-    }
-    next(e);
-  }
+  test('rechaza registro con email duplicado', async () => {
+    const body = {
+      full_name: 'Pepe', email: 'dup@test.com', password: 'secret123',
+      accept_terms: true, accept_privacy: true, accept_kyc: true,
+    };
+    await request(app).post('/api/auth/register').send(body);
+    const r2 = await request(app).post('/api/auth/register').send(body);
+    assert.equal(r2.status, 409);
+  });
+
+  test('registro válido devuelve token + crea 3 consentimientos legales en la DB', async () => {
+    const r = await request(app).post('/api/auth/register').send({
+      full_name: 'María García', email: 'maria@test.com', password: 'mtp1234',
+      accept_terms: true, accept_privacy: true, accept_kyc: true,
+      sector: 'Legal',
+    });
+    assert.equal(r.status, 200);
+    assert.ok(r.body.token, 'debe devolver JWT');
+    assert.equal(r.body.user.email, 'maria@test.com');
+    assert.equal(r.body.user.role, 'usuario');
+    assert.ok(!r.body.user.password_hash, 'no debe exponer password_hash');
+
+    // Las 3 filas en legal_consents
+    const { LegalConsent } = await import('../src/models/index.js');
+    const consents = await LegalConsent.find({ user_id: r.body.user.id });
+    assert.equal(consents.length, 3, 'debe haber 3 consentimientos (terms+privacy+kyc)');
+    const types = consents.map(c => c.document_type).sort();
+    assert.deepEqual(types, ['kyc', 'privacy', 'terms']);
+  });
+
+  test('as_verifier=true crea cuenta con rol verificador', async () => {
+    const r = await request(app).post('/api/auth/register').send({
+      full_name: 'Dr. Juan', email: 'juan@test.com', password: 'mtp1234',
+      accept_terms: true, accept_privacy: true, accept_kyc: true,
+      as_verifier: true, specialty: 'contador',
+    });
+    assert.equal(r.body.user.role, 'verificador');
+  });
 });
 
-/** POST /api/payments/crypto/confirm — usuario pega el tx hash y validamos on-chain */
-r.post('/crypto/confirm', requireAuth, async (req, res, next) => {
-  try {
-    const { order_id, tx_hash } = req.body || {};
-    if (!order_id || !tx_hash) return res.status(400).json({ error: 'order_id y tx_hash son obligatorios' });
+describe('POST /api/auth/login', () => {
+  test('rechaza credenciales inválidas', async () => {
+    const r = await request(app).post('/api/auth/login')
+      .send({ email: 'no@existe.com', password: 'wrong' });
+    assert.equal(r.status, 401);
+  });
 
-    const order = await Payment.findOne({ order_id, user_id: req.user.id });
-    if (!order) return res.status(404).json({ error: 'Orden no encontrada' });
-    if (order.method !== 'crypto') return res.status(400).json({ error: 'La orden no es de pago en cripto' });
-    if (order.status === 'aprobado') return res.json({ ok: true, status: 'aprobado', note: 'Orden ya confirmada' });
-
-    const result = await verifyCryptoTransfer({
-      txHash: tx_hash,
-      chainId: order.crypto_chain_id,
-      token: order.crypto_token.toLowerCase(),
-      expectedAmountUnits: order.crypto_amount_units,
+  test('login válido devuelve token', async () => {
+    await request(app).post('/api/auth/register').send({
+      full_name: 'X', email: 'x@test.com', password: 'mtp1234',
+      accept_terms: true, accept_privacy: true, accept_kyc: true,
     });
-
-    if (!result.ok) {
-      return res.status(400).json({ error: result.error, ...result });
-    }
-
-    // Marcar la orden como aprobada
-    order.status = 'aprobado';
-    order.crypto_tx_hash = tx_hash;
-    order.crypto_block_number = result.block_number;
-    order.crypto_confirmations = result.confirmations;
-    order.crypto_from_address  = result.from;
-    order.completed_at = new Date();
-    await order.save();
-
-    // Activar membresía si corresponde
-    if (order.concept === 'profesional' || order.concept === 'premium') {
-      await User.findByIdAndUpdate(order.user_id, { membership: order.concept });
-    }
-
-    await logActivity({
-      userId: req.user.id, action: 'payment_aprobado', entity: 'payment', entityId: order_id,
-      details: `Cripto ${order.crypto_token} en ${result.network} · ${result.amount_display} · tx ${tx_hash.slice(0,12)}…`,
-      ip: req.ip,
-    });
-
-    res.json({
-      ok: true,
-      status: 'aprobado',
-      tx_hash,
-      block_number: result.block_number,
-      confirmations: result.confirmations,
-      explorer_url: result.explorer_url,
-      amount: result.amount_display,
-      token: result.token,
-      network: result.network,
-    });
-  } catch (e) { next(e); }
+    const r = await request(app).post('/api/auth/login')
+      .send({ email: 'x@test.com', password: 'mtp1234' });
+    assert.equal(r.status, 200);
+    assert.ok(r.body.token);
+  });
 });
 
-export default r;
+describe('GET /api/auth/me', () => {
+  test('requiere autenticación', async () => {
+    const r = await request(app).get('/api/auth/me');
+    assert.equal(r.status, 401);
+  });
+
+  test('devuelve el usuario logueado', async () => {
+    const reg = await request(app).post('/api/auth/register').send({
+      full_name: 'Y', email: 'y@test.com', password: 'mtp1234',
+      accept_terms: true, accept_privacy: true, accept_kyc: true,
+    });
+    const r = await request(app).get('/api/auth/me')
+      .set('Authorization', `Bearer ${reg.body.token}`);
+    assert.equal(r.status, 200);
+    assert.equal(r.body.user.email, 'y@test.com');
+  });
+});
